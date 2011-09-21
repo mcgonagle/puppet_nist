@@ -1,0 +1,22 @@
+README
+------
+The purpose of these Puppet manifests and kickstart file is to assist system 
+administrators deploying the United States Government Configuration Baseline
+(USGCB) for Red Hat Enterprise Linux 5. These were created by NSA SNAC to
+support adoption of USGCB settings.
+
+Puppet is only one method that is available for automating the configuration and
+management of systems, and the existence of this resource does not constitute an
+endorsement of it.  Information on Puppet is available at www.puppetlabs.com.
+Even if Puppet is not the management software used in your environment, these
+files should demonstrate how to apply security-relevant settings from the
+baseline.  These files should also demonstrate and reinforce the idea that
+whenever many systems should be operating with similar settings, their
+configuration and management should be automated by software designed for that
+purpose.
+
+Always test in a controlled lab environment before deploying any software on
+production systems.
+
+See the file INSTRUCTIONS for information on how to perform an installation of
+Red Hat Enterprise Linux 5 and configure it to be compliant with the baseline.

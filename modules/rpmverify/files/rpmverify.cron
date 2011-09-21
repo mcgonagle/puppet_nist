@@ -1,0 +1,6 @@
+#!/bin/sh
+#
+LOGFILE=/var/log/puppet/rpmverify.log
+
+/bin/date '+%F %R' > $LOGFILE
+/bin/rpm -qVa | /bin/awk '$2!="c" {print $0}' >> $LOGFILE

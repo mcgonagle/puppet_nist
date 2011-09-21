@@ -1,0 +1,82 @@
+# File managed by Puppet <%= puppetversion %> on <%= fqdn %>
+########################################################################
+
+# ### begin forwarding rule ###
+# The statement between the begin ... end define a SINGLE forwarding
+# rule. They belong together, do NOT split them. If you create multiple
+# forwarding rules, duplicate the whole block!
+# Remote Logging (we use TCP for reliable delivery)
+#
+# An on-disk queue is created for this action. If the remote host is
+# down, messages are spooled to disk and sent when it is up again.
+$WorkDirectory /var/spool/rsyslog # where to place spool files
+$ActionQueueFileName fwdRule1 # unique name prefix for spool files
+$ActionQueueMaxDiskSpace 1g   # 1gb space limit (use as much as possible)
+$ActionQueueSaveOnShutdown on # save messages to disk on shutdown
+$ActionQueueType LinkedList   # run asynchronously
+$ActionResumeRetryCount -1    # infinite retries if host is down
+# remote host is: name/ip:port, e.g. 192.168.0.1:514, port optional
+<% syslog_servers.each do |syslog| -%>
+*.*                                                     @@<%= syslog %>
+<% end -%>
+# ### end of the forwarding rule ###
+
+
+########################################################################
+### Syslog local configuration:
+###
+### The remainder of this file contains a configuration which stores
+### a copy of each log message in an appropriate file under /var/log.
+### On client machines, many of these files will be empty, but we use
+### the same syslog configuration on all machines for consistency and
+### ease of correllation.
+###
+### N.B. Putting - in front of the logname (i.e. -/var/log/maillog)
+### causes syslog to avoid syncing after each log attempt.  We should
+### use this for verbose logs.
+########################################################################
+
+########################################################################
+### Multi-service facilities:
+###
+### The following facilities are each used for several services, so we
+### have to use combined logs from which administrators can grep for the
+### specific service they want to monitor
+########################################################################
+
+### Standard things we expect to find in messages
+auth,user.*                                             /var/log/messages
+
+### This includes iptables, selinux, disk errors, reboot messages, etc
+kern.*                                                  /var/log/kern.log
+
+### Many daemons, including upsd, named, ntpd, snort
+daemon.*                                                /var/log/daemon.log
+
+### Programs should use authpriv for sensitive log information
+authpriv.*                                              /var/log/secure
+
+### Mail-related programs include postfix, sendmail, and pop3
+mail.*                                                  -/var/log/maillog
+
+########################################################################
+### Single-service facilities:
+###
+### Each of these is a program which logs to its own dedicated facility,
+### and thus gets its own file.  Note that programs can log wherever
+### they want.  If a new program is added which starts writing to one of
+### these logs, try to reconfigure it to write elsewhere.
+########################################################################
+
+### Facilities which ship with the system
+cron.*                                                  /var/log/cron
+syslog.*                                                /var/log/syslog
+
+### Local facilities
+### We don't use any of these facilities locally, so store them in a
+### special file so we'll notice if anything starts using them.  If you
+### are adding a new service which needs its own logging facility,
+### take one of the unused local? ones from this list.
+########################################################################
+
+lpr,news,uucp,local0,local1,local2,local3,local4,local5,local6.*                /var/log/unused.log

@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+#
+# Add some intelligence around multiple arguments
+# so that "puppet agent" gets dereferenced to "puppetd" etc
+
+
+MAN="${1}"
+
+if [ "puppet" = "${1}" ]; then
+  if [ ! -z "${2}" ]; then
+    case "${2}" in
+      agent)
+        MAN="puppetd"
+        ;;
+      master)
+        MAN="puppetmasterd"
+        ;;
+      cert)
+        MAN="puppetca"
+        ;;
+      filebucket)
+        MAN="filebucket"
+        ;;
+      doc)
+        MAN="puppetdoc"
+        ;;
+      resource)
+        MAN="ralsh"
+        ;;
+      describe)
+        MAN="pi"
+        ;;
+      kick)
+        MAN="puppetrun"
+        ;;
+      queue)
+        MAN="puppetqd"
+        ;;
+    esac
+  fi
+fi
+
+MANPATH=/opt/puppet/share/man:$MANPATH man "${MAN}"

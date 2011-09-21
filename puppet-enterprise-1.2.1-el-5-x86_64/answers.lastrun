@@ -1,0 +1,4 @@
+q_puppetagent_install=y
+q_puppetagent_server=puppetmaster.local
+q_puppetmaster_install=y
+q_upgrade_installation=y

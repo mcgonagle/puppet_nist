@@ -1,0 +1,2750 @@
+#! /bin/bash
+
+#==========================================================
+# Copyright @ 2011 Puppet Labs, LLC
+# Redistribution prohibited.
+# Address: 411 NW Park Ave., Suite 500 / Portland, OR 97209
+# Phone: (877) 575-9775
+# Email: info@puppetlabs.com
+#
+# Please refer to the LICENSE.pdf file included
+# with the Puppet Enterprise distribution
+# for licensing information.
+#==========================================================
+
+#===[ Summary ]=========================================================
+
+# This program installs Puppet Enterprise. Run this file to start the
+# interactive installation or run with a "-h" option to display help.
+
+#===[ Conventions ]=====================================================
+
+# VARIABLES
+#
+# Variable names starting with "q_" are sanitized user answers to
+# questions asked by the `ask` function.
+#
+# Variable names starting with "t_" are transient variables for use
+# within a function. For example, "t_ask__name" is a transient variable
+# for storing a "name" within the "ask" function. This convention is
+# necessary because all POSIX sh variables are globals and there's no
+# way to localize the scope of variables to prevent functions from
+# stomping over each other's state.
+#
+# Variable names in all capital letters are globals that are
+# intentionally shared between different functions.
+#
+# This file can be sourced into a shell for use as a library.
+
+#===[ Functions ]=======================================================
+
+# Stop executioning the program, after cleaning up.
+exception_handler() {
+    display_newline
+    display_major_separator
+    display_newline
+    display_failure "Cancelling installation"
+    quit
+}
+
+# Invoke the exception_handler on CTRL-C or "set -e" errors.
+register_exception_handler() {
+    trap exception_handler INT TERM EXIT
+}
+
+# Remove the exception handler.
+unregister_exception_handler() {
+    trap - INT TERM EXIT
+}
+
+# Display a multiline string, because we can't rely on `echo` to do the right thing.
+#
+# Arguments:
+# 1. Text to display.
+display() {
+    display_nonewline "${1?}\n"
+}
+
+# Display a multiline string without a trailing newline.
+#
+# Arguments:
+# 1. Text to display.
+display_nonewline() {
+    printf -- "${1?}"
+}
+
+# Create the workdir, a temporary directory for use by the program, if needed.
+prepare_workdir() {
+    if [ -z "${WORKDIR:-""}" -o ! -d "${WORKDIR:-""}" ]; then
+        # NOTE: The `mktemp` command is not POSIX, but is supported by most UNIX variants:
+        WORKDIR=`mktemp -t -d tmp.puppet-enterprise-installer.XXXXXX`
+    fi
+}
+
+# Remove the workdir, a temporary directory used by this installer:
+remove_workdir() {
+    if [ ! -z "${WORKDIR:-""}" ]; then
+        if [ -d "${WORKDIR?}" ]; then
+            rm -rf "${WORKDIR?}"
+        fi
+        unset WORKDIR
+    fi
+}
+
+# Exit the installer and remove the workdir if it exists.
+#
+# Arguments:
+# 1. Exit value, defaults to 0.
+quit() {
+    unregister_exception_handler
+    remove_workdir
+    exit "${1:-"0"}"
+}
+
+# Display a newline
+display_newline() {
+    display ''
+}
+
+# Display an error message to STDERR, but do not exit.
+#
+# Arguments:
+# 1. Message to display.
+display_error() {
+    echo "!! ERROR: ${1?}" | display_wrapped_text 0 1>&2
+    display_newline 1>&2
+}
+
+# Display an error message to STDERR and exit the program.
+#
+# Arguments:
+# 1. Error message to display.
+display_failure() {
+    display_error "${1?}"
+    display_footer
+    quit 1
+}
+
+# Display a failure within "prepare_platform".
+#
+# Arguments:
+# 1. Error message to display.
+display_platform_failure() {
+    IS_FAILURE=y
+
+    # Set default columns if needed
+    if [ -z "${PLATFORM_COLUMNS:-""}" ]; then
+        PLATFORM_COLUMNS=72
+    fi
+
+    display_failure "${1?}"
+}
+
+# Display usage information, optionally display error message.
+#
+# Arguments:
+# 1. Error message to display. Optional.
+display_usage() {
+    t_display_usage__error="${1:-""}"
+
+    display "
+USAGE: $(basename "${0?}") [-a ANSWER_FILE] [-A ANSWER_FILE] [-D] [-h] [-l LOG_FILE] [-n] [-s ANSWER_FILE]
+
+OPTIONS:
+
+    -a ANSWER_FILE
+        Read answers from file and quit with error if an answer is missing.
+    -A ANSWER_FILE
+        Read answers from file and prompt for input if an answer is missing.
+    -D
+        Display debugging information.
+    -h
+        Display this help.
+    -l LOG_FILE
+        Log commands and results to file.
+    -n
+        Run in 'noop' mode; show commands that would have been run
+        during installation without running them
+    -s ANSWER_FILE
+        Save answers to file and quit without installing."
+
+    if [ ! -z "${t_display_usage__error?}" ]; then
+        display_newline
+        display_failure "${t_display_usage__error?}"
+    else
+        display_footer
+        quit
+    fi
+}
+
+# Display a step in the installation process.
+#
+# Arguments:
+# 1. Description of the step, e.g. "PERFORM INSTALLATION"
+# 2. Display newline afterwards? Defaults to 'y'.
+display_step() {
+    t_display_step__description="${1?}"
+    t_display_step__newline="${2:-"y"}"
+
+    if [ -z "${DISPLAY_STEP__NUMBER:-""}" ]; then
+        DISPLAY_STEP__NUMBER=1
+    else
+        DISPLAY_STEP__NUMBER=$(( 1 + ${DISPLAY_STEP__NUMBER?} ))
+    fi
+
+    display_newline
+    display_minor_separator
+    display_newline
+    display "STEP ${DISPLAY_STEP__NUMBER?}: ${t_display_step__description?}"
+
+    if [ y = "${t_display_step__newline?}" ]; then
+        display_newline
+    fi
+}
+
+# Display the name of a product and its description.
+#
+# Arguments:
+# 1. Name of product, e.g. "Puppet Strings"
+# 2. Description of the product, e.g. "Enterprise-quality strings for your marionettes."
+display_product() {
+    t_display_product__name="${1?}"
+    t_display_product__description="${2?}"
+
+    display "
+-> ${t_display_product__name?}
+
+$(echo "${t_display_product__description?}" | display_wrapped_text)
+"
+}
+
+# Display the comment line.
+#
+# Arguments:
+# 1. Comment to display.
+display_comment() {
+    display "## ${1?}"
+}
+
+# Display the fake commaned.
+#
+# Arguments:
+# 1. Command to display, e.g., "ls -la"
+display_placeholder() {
+    t_display_placeholder__message="++ ${1?}"
+
+    display "${t_display_placeholder__message?}"
+    if has_logfile; then
+        echo "${t_display_placeholder__message?}" >> "${LOGFILE?}"
+    fi
+}
+
+# Display a major separator line.
+display_major_separator() {
+    if [ -z "${t_display_major_separator:-""}" ]; then
+        t_display_major_separator="$(display_extend_text =)"
+    fi
+
+    display "${t_display_major_separator?}"
+}
+
+# Display a minor separator line.
+display_minor_separator() {
+    if [ -z "${t_display_minor_separator:-""}" ]; then
+        t_display_minor_separator="$(display_extend_text -)"
+    fi
+
+    display "${t_display_minor_separator?}"
+}
+
+# Display the header.
+display_header() {
+    display_major_separator
+    display_newline
+    display "Puppet Enterprise v$(cat "$(installer_dir)/VERSION") installer"
+}
+
+# Display the footer.
+display_footer() {
+    display_newline
+    display_major_separator
+}
+
+# Display a line of the given character extended to the full width of the terminal.
+#
+# Arguments:
+# 1. Character to display, e.g. "="
+display_extend_text() {
+    prepare_platform
+
+    echo "${1?}" "${PLATFORM_COLUMNS?}" | awk '{ result=""; for (i = 1; i <= $2; i++) { printf($1) } }'
+}
+
+# Display wrapped, indented text..
+#
+# Arguments:
+# 1. Spaces to use for the initial line's indentation, e.g. 0
+# 2. Spaces to use for the Subsequent lines' indentation, e.g. 4
+# 3. Maximum width of the indented text before it's wrapped. Defaults to a sensible value.
+#
+# Example:
+#   echo "Hello world!" | display_wrapped_text 4 2 4
+display_wrapped_text() {
+    t_display_wrapped_text__initial="${1:-"3"}"
+    t_display_wrapped_text__subsequent="${2:-"3"}"
+    t_display_wrapped_text__maxlength="${3:-""}"
+
+    prepare_platform
+
+    # Set default maxlength value based on terminal width
+    if [ -z "${t_display_wrapped_text__maxlength?}" ]; then
+        t_display_wrapped_text__maxlength="$(( ${PLATFORM_COLUMNS?} - 4 ))"
+    fi
+
+    # If no awk is available, just use cat
+    if [ -z "${PLATFORM_AWK:-""}" ]; then
+        cat
+        return
+    fi
+
+    "${PLATFORM_AWK?}" -vmaxlength="${t_display_wrapped_text__maxlength?}" -vinitial="${t_display_wrapped_text__initial?}" -vsubsequent="${t_display_wrapped_text__subsequent?}" '
+        function set_indent() {
+            if (is_initial == 1)
+                spacing = initial
+            else
+                spacing = subsequent
+
+            if (spacing > 0)
+                indent = sprintf(("%" spacing "s"), " ")
+            else
+                indent = ""
+        }
+
+        BEGIN {
+            if (! maxlength)
+                maxlength = 72
+
+            if (! initial)
+                initial = 0
+
+            if (! subsequent)
+                subsequent = 0
+
+            buffer = ""
+            is_initial = 1
+            current = 0
+        }
+
+        {
+            if (NF) {
+                for (i = 1; i <= NF ; i++) {
+                    if (buffer == "") {
+                        buffer = $i
+                    } else {
+                        set_indent()
+
+                        if (length(indent) + length(buffer) + length($i) + 1 <= maxlength) {
+                            buffer = ( buffer " " $i )
+                        } else {
+                            if (is_initial == 1) {
+                                is_initial = 0
+                            }
+                            printf("%s%s\n", indent, buffer)
+                            buffer = $i
+                        }
+                    }
+                 }
+          } else {
+              buffer = ""
+              print
+          }
+        }
+
+        END {
+            if (length(buffer) > 0)
+                set_indent()
+                printf("%s%s", indent, buffer)
+        }
+    '
+}
+
+# Display a list of missing vendor packages.
+#
+# Arguments:
+# 1. String containing a list of missing vendor packages separated by spaces.
+display_missing_vendor_packages() {
+    echo "Required vendor packages missing on computer:" | display_wrapped_text
+    display_newline
+    printf "${1?}" | sed 's/^/   * /g'
+    display_newline
+    display_newline
+}
+
+# Display the "certdnsnames" derived from the given hostnames. Will also add entries for "puppet" and the "puppet.$DOMAIN_NAME" for each domain name specified.
+#
+# Arguments:
+# 1. Colon-separated list of hostnames to derive the "certdnsnames" from, e.g. "foo:bar".
+display_certdnsnames() {
+    t_display_certdnsnames__result=
+
+    for t_display_certdnsnames__hostname in "puppet" $(echo "${1?}" | sed 's/:/ /g'); do
+        t_display_certdnsnames__base_hostname=`echo "${t_display_certdnsnames__hostname?}" | cut -s -d. -f1`
+        t_display_certdnsnames__domain=`echo "${t_display_certdnsnames__hostname?}" | cut -s -d. -f2-`
+        if [ -z "${t_display_certdnsnames__domain?}" ]; then
+            t_display_certdnsnames__result="${t_display_certdnsnames__result?}\n${t_display_certdnsnames__hostname}"
+        else
+            t_display_certdnsnames__result="${t_display_certdnsnames__result?}\n${t_display_certdnsnames__hostname}\n${t_display_certdnsnames__base_hostname}"
+            if [ "puppet" != "${t_display_certdnsnames__base_hostname?}" ]; then
+                t_display_certdnsnames__result="${t_display_certdnsnames__result?}\npuppet.${t_display_certdnsnames__domain}"
+            fi
+        fi
+    done
+
+    printf "${t_display_certdnsnames__result?}" | ${PLATFORM_EGREP?} '\w' | sort | uniq | xargs | sed 's/[[:space:]]/:/g'
+}
+
+# Display a question, make the user answer it, and set a variable with their answer.
+#
+# Arguments:
+# 1. Name of the variable to export, e.g. "q_favorite_color"
+# 2. Question text to display, e.g. "What's your favorite color?"
+# 3. Kind of question, e.g. "Yn" to show a 'Y/n' prompt that defaults to 'yes', "yN" to show a y/N prompt that defaults to 'no', "String" for a manditory string response, "StringOrBlank" for an optional string response.
+# 4. Default answer, optional. Currently only supported for "String" questions.
+ask() {
+    t_ask__name="${1?}"
+    t_ask__question="${2?}"
+    t_ask__kind="${3?}"
+    t_ask__default="${4:-""}"
+
+    t_ask__message="?? ${t_ask__question?} "
+    case "${t_ask__kind?}" in
+        Yn)
+            t_ask__message="${t_ask__message?}[Y/n] "
+            ;;
+        yN)
+            t_ask__message="${t_ask__message?}[y/N] "
+            ;;
+        StringOrBlank)
+            t_ask__message="${t_ask__message?}[Default: (blank)] "
+            ;;
+        String*)
+            if [ ! -z "${t_ask__default?}" ]; then
+                t_ask__message="${t_ask__message?}[Default: ${t_ask__default?}] "
+            fi
+            ;;
+        Password*)
+            if [ ! -z "${t_ask__default?}" ]; then
+                t_ask__message="${t_ask__message?}[Default: ${t_ask__default?}] "
+            fi
+            ;;
+        *)
+            display_failure "Invalid question kind: ${t_ask__kind?}"
+            ;;
+    esac
+
+    # Try to load the answer from an existing variable, e.g. given name "q" look at variable "$q".
+    eval t_ask__answered=\$"${t_ask__name:-""}"
+
+    # Was the variable "$q" defined before the question was run, like if the answer file defined it?
+    eval '[ -n "${'"${t_ask__name:-}"'}" ] && t_ask__defined=0 || t_ask__defined=1'
+
+    t_ask__success=n
+    until [ y = "${t_ask__success?}" ]; do
+        echo "${t_ask__message?}" | display_wrapped_text 0
+        display_nonewline " "
+        if [ 0 = "${t_ask__defined?}" ]; then
+            if [ "${t_ask__kind?}" = "Password" ]; then
+                t_ask__response="${t_ask__answered?}"
+                display ""
+                unset t_ask__answered
+            else
+                t_ask__response="${t_ask__answered?}"
+                display "${t_ask__response?}"
+                unset t_ask__answered
+            fi
+        else
+            if [ 0 != "${t_ask__defined?}" -a y = "${IS_ANSWER_REQUIRED:-""}" ]; then
+                display_newline
+                display_failure "Could not find response for above question in answer file. (Variable needed: ${t_ask__name?})"
+            fi
+            if [ "${t_ask__kind?}" = "Password" ]; then
+                stty -echo
+                read -r t_ask__response; echo
+            else
+                read -r t_ask__response
+            fi
+        fi
+
+        case "${t_ask__kind?}" in
+            Yn)
+                if [ -z "${t_ask__response?}" -o y = "${t_ask__response?}" -o Y = "${t_ask__response?}" ]; then
+                    t_ask__answer=y
+                    t_ask__success=y
+                elif [ n = "${t_ask__response?}" -o N = "${t_ask__response?}" ]; then
+                    t_ask__answer=n
+                    t_ask__success=y
+                else
+                    display_error 'Answer must be either "y", "n" or <ENTER> for "y"'
+                fi
+                ;;
+            yN)
+                if [ y = "${t_ask__response?}" -o Y = "${t_ask__response?}" ]; then
+                    t_ask__answer=y
+                    t_ask__success=y
+                elif [ -z "${t_ask__response?}" -o n = "${t_ask__response?}" -o N = "${t_ask__response?}" ]; then
+                    t_ask__answer=n
+                    t_ask__success=y
+                else
+                    display_error 'Answer must be either "y", "n" or <ENTER> for "n"'
+                fi
+                ;;
+            String)
+                if [ -z "${t_ask__response?}" -a ! -z "${t_ask__default?}" ]; then
+                    t_ask__answer="${t_ask__default?}"
+                    t_ask__success=y
+                elif [ ! -z ${t_ask__response?} ]; then
+                    t_ask__answer="${t_ask__response?}"
+                    t_ask__success=y
+                else
+                    display_error 'Answer must be a string'
+                fi
+                ;;
+            StringForceLowerCase)
+                if [ -z "${t_ask__response?}" -a ! -z "${t_ask__default?}" ]; then
+                    t_ask__answer="$(echo "${t_ask__default?}" | tr '[A-Z]' '[a-z]')"
+                    t_ask__success=y
+                elif [ ! -z ${t_ask__response?} ]; then
+                    t_ask__answer="$(echo "${t_ask__response?}" | tr '[A-Z]' '[a-z]')"
+                    t_ask__success=y
+                else
+                    display_error 'Answer must be a string'
+                fi
+                ;;
+            StringWithoutCommas)
+                if [ -z "${t_ask__response?}" -a ! -z "${t_ask__default?}" ]; then
+                    t_ask__answer="${t_ask__default?}"
+                    t_ask__success=y
+                elif [ ! -z ${t_ask__response?} ] && echo "${t_ask__response?}" | grep -qv '[, ]'; then
+                    t_ask__answer="${t_ask__response?}"
+                    t_ask__success=y
+                else
+                    display_error 'Answer must be a string without any commas (use : to separate names)'
+                fi
+                ;;
+            StringOrBlank)
+                t_ask__answer="${t_ask__response?}"
+                t_ask__success=y
+                ;;
+            Password)
+                if [ 1 = "${t_ask__defined?}" ]; then
+                    read -p "Confirm Password: " t_ask__response_confirm; echo
+                    stty echo
+                    if [ "${t_ask__response?}" = "${t_ask__response_confirm?}" ]; then
+                        t_ask__answer="${t_ask__response?}"
+                        LEN=${#t_ask__answer}
+                        if [ $LEN -lt 4 ]; then
+                            t_ask__success=n
+                            display_error 'Password must be a minimum of 4 characters'
+                        else
+                            t_ask__success=y
+                        fi
+                    else
+                        display_error 'Password mismatch: Please try agian'
+                    fi
+                else
+                    t_ask__answer="${t_ask__response?}"
+                    t_ask__success=y
+                fi
+                ;;
+            *)
+                ;;
+        esac
+    done
+
+    eval "${t_ask__name?}=${t_ask__answer?}"
+}
+
+# Display the command to run and execute it if not running in noop mode.
+#
+# Arguments:
+# 1. Command to execute, e.g. "ls -la"
+run() {
+    t_run__command="${1?}"
+    t_run__message="** ${t_run__command?}"
+
+    display "${t_run__message?}"
+    if has_logfile; then
+        echo "${t_run__message?}" >> "${LOGFILE?}"
+    fi
+    if is_noop; then
+        return 0
+    else
+        if has_logfile; then
+            ( eval "${t_run__command?}" ) 2>&1 | tee -a "${LOGFILE?}"
+        else
+            ( eval "${t_run__command?}" )
+        fi
+        return $?
+    fi
+}
+
+# Prepare variables storing platform information:
+# * PLATFORM_NAME : Name of the platorm, e.g. "centos".
+# * PLATFORM_TAG : Tag representing the platform, release and architecture, e.g. "centos-5-i386"
+# * PLATFORM_RELEASE : Release version, e.g. "10.10".
+# * PLATFORM_ARCHITECTURE : Architecture, e.g. "i386".
+# * PLATFORM_PACKAGING : Name of local packaging system, e.g. "dpkg".
+# * PLATFORM_AWK : Path to the desired awk, e.g. "nawk".
+# * PLATFORM_HOSTNAME : Hostnmae of this machine, e.g. "myhost.mycompany.com".
+# * PLATFORM_COLUMNS : Number of columns on the terminal or a reasonable default.
+prepare_platform() {
+
+    # Do not do detection if within a failure to avoid loop
+    if [ y = "${IS_FAILURE:-""}" ]; then
+        return
+    fi
+
+    prepare_workdir
+
+    # NONPORTABLE
+
+    # Awk
+    if [ -z "${PLATFORM_AWK:-""}" ]; then
+        for command in gawk nawk awk; do
+            if type "${command?}" > /dev/null 2>&1; then
+                PLATFORM_AWK="${command?}"
+                break
+            fi
+        done
+
+        if [ -z "${PLATFORM_AWK:-""}" ]; then
+            display_platform_failure "Can't find \"awk\" in PATH -- please install it before continuing"
+        fi
+    fi
+
+    # JJM Default to grep -E to preserve existing behavior.
+    # Note, this function gets called over and over, so we need to be a bit defensive if the variable is already set.
+    if [ -z "${PLATFORM_EGREP}" ]; then
+        PLATFORM_EGREP='grep -E'
+    fi
+
+    # Name and release
+    if [ -z "${PLATFORM_NAME:-""}" -o -z "${PLATFORM_RELEASE:-""}" ]; then
+        CLIENT_ONLY='false'
+        # First try identifying using lsb_release.  This takes care of Ubuntu (lsb-release is part of ubuntu-minimal).
+        if type lsb_release > /dev/null 2>&1; then
+            t_prepare_platform=`lsb_release -icr 2>&1`
+
+            PLATFORM_NAME="$(printf "${t_prepare_platform?}" | ${PLATFORM_EGREP?} '^Distributor ID:' | cut -s -d: -f2 | sed 's/[[:space:]]//' | tr '[[:upper:]]' '[[:lower:]]')"
+
+            # Sanitize name for unusual platforms
+            case "${PLATFORM_NAME?}" in
+                redhatenterpriseserver | redhatenterpriseclient | redhatenterpriseas | redhatenterprisees | enterpriseenterpriseserver )
+                    PLATFORM_NAME=rhel
+                    ;;
+                scientific | scientifics | scientificsl )
+                    PLATFORM_NAME=rhel
+                    ;;
+                'suse linux' )
+                    PLATFORM_NAME=sles
+                ;;
+            esac
+
+            # Release
+            PLATFORM_RELEASE="$(printf "${t_prepare_platform?}" | ${PLATFORM_EGREP?} '^Release:' | cut -s -d: -f2 | sed 's/[[:space:]]//g')"
+
+            # Sanitize release for unusual platforms
+            case "${PLATFORM_NAME?}" in
+                centos | rhel )
+                    # Platform uses only number before period as the release, e.g. "CentOS 5.5" is release "5"
+                    PLATFORM_RELEASE="$(printf "${PLATFORM_RELEASE?}" | cut -d. -f1)"
+                    ;;
+                debian )
+                    # Platform uses only number before period as the release, e.g. "Debian 6.0.1" is release "6"
+                    PLATFORM_RELEASE="$(printf "${PLATFORM_RELEASE?}" | cut -d. -f1)"
+                    ;;
+            esac
+        # Test for Solaris.
+        elif [ "x$(uname -s)" = "xSunOS" ]; then
+            PLATFORM_NAME="solaris"
+            t_platform_release="$(uname -r)"
+            # JJM We get back 5.10 but we only care about the right side of the decimal.
+            PLATFORM_RELEASE="${t_platform_release##*.}"
+            PLATFORM_EGREP='egrep'
+        # Test for RHEL variant. RHEL, CentOS, OEL
+        elif [ -f /etc/redhat-release -a -r /etc/redhat-release -a -s /etc/redhat-release ]; then
+            # Oracle Enterprise Linux 5.3 and higher identify the same as RHEL
+            if grep -qi 'red hat enterprise' /etc/redhat-release; then
+                PLATFORM_NAME=rhel
+            elif grep -qi 'centos' /etc/redhat-release; then
+                PLATFORM_NAME=centos
+            elif grep -qi 'scientific' /etc/redhat-release; then
+                PLATFORM_NAME=rhel
+            fi
+            # Release - take first digit after ' release ' only.
+            PLATFORM_RELEASE="$(sed 's/.*\ release\ \([[:digit:]]\).*/\1/g' /etc/redhat-release)"
+        # Test for Debian releases
+        elif [ -f /etc/debian_version -a -r /etc/debian_version -a -s /etc/debian_version ]; then
+            t_prepare_platform__debian_version=`cat /etc/debian_version`
+
+            if printf "${t_prepare_platform__debian_version?}" | ${PLATFORM_EGREP?} '^[[:digit:]]'; then
+                PLATFORM_NAME=debian
+                PLATFORM_RELEASE="$(printf "${t_prepare_platform__debian_version?}" | sed 's/\..*//')"
+            fi
+        elif [ -f /etc/SuSE-release -a -r /etc/SuSE-release ]; then
+            t_prepare_platform__suse_version=`cat /etc/SuSE-release`
+
+            if printf "${t_prepare_platform__suse_version?}" | ${PLATFORM_EGREP?} 'Enterprise Server'; then
+                PLATFORM_NAME=sles
+                t_version=`/bin/cat /etc/SuSE-release | grep VERSION | sed 's/^VERSION = \(\d*\)/\1/' `
+                t_patchlevel=`cat /etc/SuSE-release | grep PATCHLEVEL | sed 's/^PATCHLEVEL = \(\d*\)/\1/' `
+                PLATFORM_RELEASE="${t_version}"
+            fi
+        elif [ "x$(uname -s)" = "xDarwin" ]; then
+            unregister_exception_handler
+            display_newline
+            echo "!! ERROR: Mac OS is not a currently supported platform."
+            display_newline
+            quit 1
+        fi
+    fi
+
+    case "${PLATFORM_NAME?}" in
+        centos | rhel )
+            if [ "${PLATFORM_RELEASE?}" = '4' ] ; then
+                CLIENT_ONLY='true'
+            fi
+            ;;
+        solaris)
+            CLIENT_ONLY='true'
+            ;;
+    esac
+
+    if [ -z "${PLATFORM_NAME:-""}" -o -z "${PLATFORM_RELEASE:-""}" ]; then
+        display_platform_failure "Unknown platform"
+    fi
+
+    # Packaging
+    if [ -z "${PLATFORM_PACKAGING:-""}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles )
+                PLATFORM_PACKAGING=rpm
+                ;;
+            ubuntu | debian )
+                PLATFORM_PACKAGING=dpkg
+                ;;
+            solaris )
+                PLATFORM_PACKAGING=pkgadd
+                ;;
+            *)
+                display_platform_failure "Unknown packaging system for platform: ${PLATFORM_NAME?}"
+                ;;
+        esac
+    fi
+
+    # Architecture
+    if [ -z "${PLATFORM_ARCHITECTURE:-""}" ]; then
+        case "${PLATFORM_NAME?}" in
+            solaris )
+                PLATFORM_ARCHITECTURE="$(uname -p)"
+                ;;
+            *)
+                PLATFORM_ARCHITECTURE="`uname -m`"
+                ;;
+        esac
+        if [ x86_64 = "${PLATFORM_ARCHITECTURE?}" ]; then
+            case "${PLATFORM_NAME?}" in
+                ubuntu | debian )
+                    PLATFORM_ARCHITECTURE=amd64
+                    ;;
+            esac
+        elif [ i686 = "${PLATFORM_ARCHITECTURE?}" ]; then
+            PLATFORM_ARCHITECTURE=i386
+        fi
+    fi
+
+    # Tag
+    if [ -z "${PLATFORM_TAG:-""}" ]; then
+        case "${PLATFORM_NAME?}" in
+            # Enterprise linux (centos & rhel) share the same packaging
+            rhel | centos )
+                PLATFORM_TAG="el-${PLATFORM_RELEASE?}-${PLATFORM_ARCHITECTURE?}"
+                ;;
+            *)
+                PLATFORM_TAG="${PLATFORM_NAME?}-${PLATFORM_RELEASE?}-${PLATFORM_ARCHITECTURE?}"
+                ;;
+        esac
+    fi
+
+    # Columns
+    if [ -z "${PLATFORM_COLUMNS:-""}" ]; then
+        PLATFORM_COLUMNS="$(stty size 2>&1 | cut -s -d" " -f2)"
+        if ! (echo $PLATFORM_COLUMNS | ${PLATFORM_EGREP?} '^[[:digit:]]+$') > /dev/null 2>&1; then
+            PLATFORM_COLUMNS=72
+        fi
+    fi
+
+    # Hostname
+    if [ -z "${PLATFORM_HOSTNAME:-""}" ]; then
+        PLATFORM_HOSTNAME=`uname -n`
+    fi
+}
+
+# Fail unless the current user has root privileges.
+prepare_user() {
+    # NONPORTABLE
+    case "${PLATFORM_NAME?}" in
+        solaris)
+            # JJM BASHISM NONPORTABLE
+            if [ ! "0" = "${EUID?}" ]; then
+                display_failure "The installer must be run by a user with \"root\" privileges."
+            fi
+            ;;
+        *)
+            if [ ! "0" = "$(id -u)" ]; then
+                display_failure "The installer must be run by a user with \"root\" privileges."
+            fi
+            ;;
+    esac
+}
+
+# Make a backup copy of the file. Creates the backup in the same directory with a timestamp and ".bak" suffix.
+#
+# Arguments:
+# 1. File to backup.
+backup_file() {
+    t_backup_file__source="${1?}"
+    t_backup_file__target="${t_backup_file__source?}.`date '+%Y%m%dT%H%M%S'`.bak"
+
+    case "${PLATFORM_NAME?}" in
+        solaris)
+            t_cp='cp -p -r'
+            ;;
+        *)
+            t_cp='cp -a'
+            ;;
+    esac
+
+    if [ -e "${t_backup_file__source?}" ]; then
+        run "${t_cp?} ${t_backup_file__source?} ${t_backup_file__target?}"
+    fi
+}
+
+# Add package to queue for installation.
+#
+# Arguments:
+# 1. Package name to install, eg. "puppet-dashboard".
+enqueue_package() {
+    if [ ! -z "${PACKAGES_REQUIRED:-""}" ]; then
+        PACKAGES_REQUIRED="${PACKAGES_REQUIRED?}\n${1?}"
+    else
+        PACKAGES_REQUIRED="${1?}"
+    fi
+}
+
+# Display queued packages that aren't installed, one package per line.
+missing_queued_packages() {
+    prepare_workdir
+    prepare_platform
+
+    # All packages required:
+    t_missing_queued_packages__required="${WORKDIR?}/packages_required"
+    # Packages currently installed:
+    t_missing_queued_packages__installed="${WORKDIR?}/packages_installed"
+    # Required packages that need to be installed:
+    t_missing_queued_packages__needed="${WORKDIR?}/packages_needed"
+
+    if [ "x${PLATFORM_NAME}" = "xsolaris" ]; then
+        printf "${PACKAGES_REQUIRED:-""}\n" | sort | uniq > "${t_missing_queued_packages__required?}"
+    else
+        printf "${PACKAGES_REQUIRED:-""}" | sort | uniq > "${t_missing_queued_packages__required?}"
+    fi
+
+    # NONPORTABLE
+    case "${PLATFORM_PACKAGING?}" in
+        rpm)
+            rpm -qa --queryformat '%{NAME}\n' `cat "${t_missing_queued_packages__required?}"` | sort | uniq > "${t_missing_queued_packages__installed?}"
+            comm -23 "${t_missing_queued_packages__required?}" "${t_missing_queued_packages__installed?}" > "${t_missing_queued_packages__needed?}"
+            cat "${t_missing_queued_packages__needed?}"
+            ;;
+        dpkg)
+            dpkg-query --show --showformat '${Package} ${Status}\n' `cat "${t_missing_queued_packages__required?}"` 2>&1 | "${PLATFORM_AWK?}" '/ installed$/ { print $1 }' | sort | uniq > "${t_missing_queued_packages__installed?}"
+            comm -23 "${t_missing_queued_packages__required?}" "${t_missing_queued_packages__installed?}" > "${t_missing_queued_packages__needed?}"
+            cat "${t_missing_queued_packages__needed?}"
+            ;;
+        pkgadd)
+            # JJM Obtain the packages required _and_ already installed.
+            # First, obtain the list of all packages installed.  Since we're using comm -23, this is OK.  (We don't need to query for the specific packages we require)
+            pkginfo | awk '{print $2}' | sort | uniq > "${t_missing_queued_packages__installed?}"
+            # Next, obtain the list of packages required, but NOT already installed
+            comm -23 "${t_missing_queued_packages__required?}" "${t_missing_queued_packages__installed?}" > "${t_missing_queued_packages__needed?}"
+            # Finally, output the file
+            cat "${t_missing_queued_packages__needed?}"
+            ;;
+        *)
+            display_failure "Do not know how to install packages on platform: ${PLATFORM_NAME?}"
+            ;;
+    esac
+}
+
+# Install the packages queued up by the `enqueue_package`.
+install_queued_packages() {
+    t_install_queued_packages__cmd=""
+    t_install_queued_packages__local="${WORKDIR?}/packages_needed_local"
+    t_install_queued_packages__remote="${WORKDIR?}/packages_needed_remote"
+    t_install_queued_packages__noask="${WORKDIR?}/noask"
+
+    prepare_workdir
+    prepare_platform
+
+    rm -f "${t_install_queued_packages__local?}"
+    rm -f "${t_install_queued_packages__remote?}"
+
+    for t_install_queued_packages__package_name in `missing_queued_packages | xargs`; do
+        if t_install_queued_packages__package_file=`package_name_to_file ${t_install_queued_packages__package_name?}`; then
+            echo "${t_install_queued_packages__package_file?}" >> "${t_install_queued_packages__local?}"
+        else
+            echo "${t_install_queued_packages__package_name?}" >> "${t_install_queued_packages__remote?}"
+        fi
+    done
+
+    if [ -s "${t_install_queued_packages__remote?}" ]; then
+        t_install_queued_packages__cmd="$(xargs < "${t_install_queued_packages__remote?}")"
+
+        # NONPORTABLE
+        case "${PLATFORM_PACKAGING?}" in
+            rpm)
+                case "${PLATFORM_NAME?}" in
+                    sles)
+                        t_install_queued_packages__cmd="zypper install -y ${t_install_queued_packages__cmd?}"
+                        ;;
+                    *)
+                        t_install_queued_packages__cmd="yum -y install ${t_install_queued_packages__cmd?}"
+                        ;;
+                esac
+                ;;
+            dpkg)
+                t_install_queued_packages__cmd="apt-get update -qq || true ; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${t_install_queued_packages__cmd?}"
+                ;;
+            pkgadd)
+                display_failure "Cannot locate the following packages: ${t_install_queued_packages__cmd}"
+                ;;
+            *)
+                display_failure "Do not know how to install packages from repositories on platform: ${PLATFORM_NAME?}"
+                ;;
+        esac
+
+        display_comment 'Installing packages from repositories...'
+        if ! run "${t_install_queued_packages__cmd?}"; then
+            display_newline
+            display_major_separator
+            display_newline
+            display_failure "Package installation failed"
+        fi
+
+        if ! is_noop; then
+            # Double-check that packages really were installed, mostly for "yum" which doesn't return error codes
+            PACKAGES_REQUIRED="$(cat "${t_install_queued_packages__remote?}")"
+            t_install_queued_packages__missing="$(missing_queued_packages | xargs)"
+            if [ ! -z "${t_install_queued_packages__missing?}" ]; then
+                display_newline
+                display_major_separator
+                display_newline
+                display_failure "Could not install required packages from your operating system's repository--this may be due to incorrect repository settings. You must install the following packages before you can install Puppet Enterprise: ${t_install_queued_packages__missing?}"
+            fi
+        fi
+    fi
+
+    if [ -s "${t_install_queued_packages__local?}" ]; then
+        t_install_queued_packages__cmd="$(xargs < "${t_install_queued_packages__local?}")"
+
+        # NONPORTABLE
+        case "${PLATFORM_PACKAGING?}" in
+            rpm)
+                t_install_queued_packages__cmd="rpm -ivh ${t_install_queued_packages__cmd?}"
+                ;;
+            dpkg)
+                t_install_queued_packages__cmd="DEBIAN_FRONTEND=noninteractive dpkg -i ${t_install_queued_packages__cmd?}"
+                ;;
+            pkgadd)
+                # Write the noask file to a temporary directory
+                # please see man -s 4 admin for details about this file:
+                # http://www.opensolarisforum.org/man/man4/admin.html
+                #
+                # The key thing we don't want to prompt for are conflicting files.
+                # The other nocheck settings are mostly defensive to prevent prompts
+                # We _do_ want to check for available free space and abort if there is
+                # not enough
+                cat <<'ENDofNOASKfile' > "${t_install_queued_packages__noask}"
+mail=
+# Overwrite already installed instances
+instance=overwrite
+# Do not bother checking for partially installed packages
+partial=nocheck
+# Do not bother checking the runlevel
+runlevel=nocheck
+# Do not bother checking package dependencies (We take care of this)
+idepend=nocheck
+rdepend=nocheck
+# DO check for available free space and abort if there isn't enough
+space=quit
+# Do not check for setuid files.
+setuid=nocheck
+# Do not check if files conflict with other packages
+conflict=nocheck
+# We have no action scripts.  Do not check for them.
+action=nocheck
+# Install to the default base directory.
+basedir=default
+ENDofNOASKfile
+                # JJM This is _not_ as mis-matched quote, we're building up a long command in the for loop.
+                t_install_queued_packages__cmd_buf="bash -ec '"
+                for t_install_queued_packages__pkg in ${t_install_queued_packages__cmd?}; do
+                    t_install_queued_packages__cmd_buf="${t_install_queued_packages__cmd_buf?} gzip -dc ${t_install_queued_packages__pkg?} | pkgadd -G -a ${t_install_queued_packages__noask?} -n -d /dev/stdin all;"
+                done
+                t_install_queued_packages__cmd_buf="${t_install_queued_packages__cmd_buf?}'"
+                t_install_queued_packages__cmd="${t_install_queued_packages__cmd_buf?}"
+                ;;
+            *)
+                display_failure "Do not know how to install packages from files on platform: ${PLATFORM_NAME?}"
+                ;;
+        esac
+
+        display_comment 'Installing packages from files...'
+        if ! run "${t_install_queued_packages__cmd?}"; then
+            display_newline
+            display_major_separator
+            display_newline
+            display_failure "Could not install packages from files; see messages above for cause."
+        fi
+    fi
+
+    unset PACKAGES_REQUIRED
+}
+
+# Display the package filename for the given package name. Returns exit value 1 if no package file was found.
+#
+# Arguments
+# 1. Package name, e.g. "puppet-facter"
+package_name_to_file() {
+    t_package_name_to_file__dir="`platform_package_dir`"
+
+    prepare_platform
+
+    # NONPORTABLE
+    case "${PLATFORM_PACKAGING?}" in
+        rpm)
+            t_package_name_to_file__file="`ls -1t "${t_package_name_to_file__dir?}"/*.rpm | grep -v '.src.rpm' | grep -v -- '-debuginfo-' | ${PLATFORM_EGREP?} "/${1?}-[[:digit:]]" | head -n1`"
+            ;;
+        dpkg)
+            t_package_name_to_file__file="`ls -1t "${t_package_name_to_file__dir?}"/*.deb | ${PLATFORM_EGREP?} "/${1?}_[[:digit:]].+_(all|${PLATFORM_ARCHITECTURE?})\.deb" | head -n1`"
+            ;;
+        pkgadd)
+            t_package_name_to_file__file="`ls -1t "${t_package_name_to_file__dir?}"/*.pkg.gz | ${PLATFORM_EGREP?} "/${1?}-[0-9]+" | head -n1`"
+            ;;
+        *)
+            display_failure "Do not know how to map package names to files on platform: ${PLATFORM_NAME?}"
+            ;;
+    esac
+
+    if [ ! -z "${t_package_name_to_file__file?}" ]; then
+        echo "${t_package_name_to_file__file?}"
+        return 0
+    else
+        # Not found
+        return 1
+    fi
+}
+
+# Display the package name for the given filename. Returns exit value 1 if no package name was found
+#
+# Arguments
+# 1. filename, e.g. pe-facter-1.5.8-1.el5.noarch.rpm
+package_file_to_name() {
+    t_package_file_to_name__dir="`platform_package_dir`"
+    case "${PLATFORM_PACKAGING?}" in
+        rpm)
+            t_package_file_to_name__name="$(rpm -q --qf '%{NAME}' -p "${t_package_file_to_name__dir?}/${1?}")"
+            ;;
+        dpkg)
+            t_package_file_to_name__name="$(dpkg -I "${t_package_file_to_name__dir?}/${1?}"  | awk '/Package:/ {print $NF}')"
+            ;;
+        *)
+            display_failure "Do not know how to map package files to names on platform: ${PLATFORM_NAME?}"
+            ;;
+    esac
+    if [ ! -z "${t_package_file_to_name__name?}" ]; then
+        echo "${t_package_file_to_name__name?}"
+        return 0
+    else
+        # Not found
+        return 1
+    fi
+}
+
+# Return the PE dependencies for a given package
+#
+# Arguments:
+# 1. filename, e.g. pe-facter-1.5.8-1.el5.noarch.rpm
+# Returns:
+# newline-separated list of package names
+package_pe_deps() {
+    case "${PLATFORM_PACKAGING?}" in
+        rpm)
+            # packages starting with 'pe-'
+            # and not containing '(' or ')' or ending in '-mmn' (virtual pkg provided by httpd)
+            t_package_pe_deps__deps="$(rpm -qR -p "$(platform_package_dir)/${1?}" | awk '/^pe-/ { if ( $1 !~ /.+[()]/ && $1 !~ /.+-mmn/ ) print $1 }')"
+            ;;
+        dpkg)
+            # packages starting with 'pe-'
+            # and not of the form pe-lib.*-ruby.* (virtual pkgs provided by pe-libruby.*)
+            t_package_pe_deps__deps="$(dpkg-deb --showformat='${Depends}' -W "$(platform_package_dir)/${1?}" | sed "s/, /\\n/g" | awk '/^pe-/ { if ( $1 !~ /pe-lib.+-ruby.*/ ) print $1}')"
+            ;;
+        *)
+            display_failure "Do not know how to determine dependencies on platform: ${PLATFORM_NAME?}"
+            ;;
+    esac
+
+    if [ ! -z "${t_package_pe_deps__deps?}" ]; then
+        echo "${t_package_pe_deps__deps?}"
+        return 0
+    else
+        # No PE dependencies found.
+        # This is to be expected sometimes.
+        return 0
+    fi
+
+}
+
+# Display path to this installer. Optionally override this by exporting INSTALLER_DIR environment variable.
+installer_dir() {
+    if [ -z "${INSTALLER_DIR:-""}" ]; then
+        INSTALLER_DIR="$(dirname "${0?}")"
+    fi
+
+    echo "${INSTALLER_DIR?}"
+}
+
+# Display platform's package path, e.g. "packages/centos-5-x86_64".
+platform_package_dir() {
+    prepare_platform
+
+    echo "$(installer_dir)/packages/${PLATFORM_TAG?}"
+}
+
+# Append the line to the buffer.
+#
+# Write out the contents of the buffer using "filebuffer_write".
+#
+# Arguments:
+# 1. Line
+filebuffer_append() {
+    prepare_workdir
+
+    echo "${1?}" >> "${WORKDIR?}/filebuffer"
+}
+
+# Write the contents of the buffer to a file if active, and display to screen.
+#
+# Add contents to the buffer using "filebuffer_append".
+#
+# Arguments:
+# 1. Filename
+filebuffer_write() {
+    if is_noop; then
+        display_comment "Would have generated file \"${1?}\" with contents:"
+    else
+        display_comment "Generated file \"${1?}\" with contents:"
+    fi
+
+    display_newline
+    sed -e 's/^/   /' < "${WORKDIR?}/filebuffer"
+    display_newline
+
+    if ! is_noop; then
+        t_filebuffer_write__directory="$(dirname "${1?}")"
+        if [ ! -d "${t_filebuffer_write__directory?}" ]; then
+            run "mkdir -p ${t_filebuffer_write__directory?}" > /dev/null
+        fi
+
+        if [ -s "${1?}" ]; then
+            backup_file "${1?}"
+        fi
+
+        cat "${WORKDIR?}/filebuffer" > "${1?}"
+    fi
+
+    filebuffer_clear
+}
+
+# Clear the buffer.
+filebuffer_clear() {
+    rm -f "${WORKDIR?}/filebuffer"
+}
+
+# Load the answers from a file. The file is just a shell script that we source.
+#
+# Arguments:
+# 1. File to load answers from.
+load_answers() {
+    t_load_answers__file="${1?}"
+
+    if [ -f "${t_load_answers__file?}" ]; then
+        if [ '.' = "$(dirname "${t_load_answers__file?}")" -a ! "./" = "$( echo "${t_load_answers__file?}" | cut -c 1-2)" ]; then
+            # Some shells can only source files if given a path.
+            t_load_answers__file="./${t_load_answers__file?}"
+        fi
+
+        display_step 'READ ANSWERS FROM FILE'
+        display_comment "Reading answers from file: ${t_load_answers__file?}"
+        . "${t_load_answers__file?}"
+    else
+        display_failure "Can't find answers file: ${t_load_answers__file?}"
+    fi
+}
+
+# Running in noop mode? Return 0 if true.
+is_noop() {
+    if [ y = "${IS_NOOP:-""}" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Was a logfile specified?
+has_logfile() {
+    if [ ! -z "${LOGFILE:-""}" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Is the package installed? Returns 0 for true, 1 for false.
+#
+# Arguments:
+# 1. Name of package.
+is_package_installed() {
+    prepare_platform
+
+    # NONPORTABLE
+    case "${PLATFORM_PACKAGING?}" in
+        rpm)
+            (rpm -qi "${1?}") > /dev/null 2>&1
+            return $?
+            ;;
+        dpkg)
+            (dpkg-query --show --showformat '${Package}:${Status}\\n' "${1?}" 2>&1 | grep ' installed') > /dev/null
+            return $?
+            ;;
+        pkgadd)
+            (pkginfo -l | grep -i "${1?}") > /dev/null 2>&1
+            return $?
+            ;;
+        *)
+            display_failure "Do not know how to check if package is installed on this platform."
+            ;;
+    esac
+}
+
+# Start the named service if needed.
+#
+# 1. Name of service .
+bounce_service() {
+    prepare_platform
+
+    # NONPORTABLE
+    case "${PLATFORM_NAME?}" in
+        centos | rhel | ubuntu | sles)
+            if ! (service "${1?}" status) > /dev/null 2>&1; then
+                run "service ${1?} start"
+            else
+                run "service ${1?} restart"
+            fi
+            ;;
+        debian)
+            if ! (invoke-rc.d "${1?}" status) > /dev/null 2>&1; then
+                run "invoke-rc.d ${1?} start"
+            else
+                run "invoke-rc.d ${1?} restart"
+            fi
+            ;;
+        *)
+            display_failure "Do not know how to restart service on this platform."
+            ;;
+    esac
+}
+
+# Enable the named service at boot.
+#
+# 1. Name of service .
+enable_service() {
+    prepare_platform
+
+    # NONPORTABLE
+    case "${PLATFORM_NAME?}" in
+        centos | rhel | ubuntu | sles)
+            run "chkconfig ${1?} on" || :
+            ;;
+        debian)
+            # This will not override existing links. --daniel 2011-01-28
+            run "update-rc.d ${1?} defaults 80 20" || :
+            ;;
+        *)
+            display_failure "Do not know how to enable a service on this platform."
+            ;;
+    esac
+}
+
+# Install a symlink for the given file into "/usr/local/bin".
+#
+# Arguments:
+# 1. Filename fragment, e.g. "sbin/puppetca" will be symlinked to "/usr/local/bin/puppetca".
+install_symlink() {
+    if [ ! -d "/usr/local/bin/" ]
+    then
+        display "\"/usr/local/bin/\" does not exist, creating."
+        run "mkdir -p /usr/local/bin/"
+    fi
+
+    for f in "$@"; do
+        t_install_symlink_basename="/usr/local/bin/`basename ${f?}`"
+        if [ -e "${t_install_symlink_basename}" ]
+        then
+            display_error "\"${t_install_symlink_basename} already exists, unable to create symlink."
+            display "Remove \"${t_install_symlink_basename}\" and run: ln -s /opt/puppet/${f?} ${t_install_symlink_basename}"
+        else
+            run "ln -nsf /opt/puppet/${f?} ${t_install_symlink_basename}"
+        fi
+    done
+}
+
+# Install util files into opt bindir
+#
+# Arguments: None
+install_utils_to_bin() {
+    for f in ${INSTALLER_DIR}/util/*; do
+        cp "${f}" /opt/puppet/bin/
+    done
+}
+
+write_facter_facts() {
+    if ! [ -d /etc/puppetlabs/facter/facts.d ]; then
+        display "Created: /etc/puppetlabs/facter/facts.d"
+        mkdir -p /etc/puppetlabs/facter/facts.d
+    fi
+    if [ -e /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt ]; then
+        display "Warning: overwriting /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt"
+        display "Creating Backup: /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt.bak"
+        run "cp -p /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt.bak"
+    fi
+    echo "fact_stomp_port=61613" > /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    echo "fact_stomp_server=${q_puppetagent_server:-localhost}" >> /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    if [ y = "${q_puppetagent_install?}" ]; then
+        echo "fact_is_puppetagent=true" >> /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    else
+        echo "fact_is_puppetagent=false" >> /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    fi
+    if [ y = "${q_puppetmaster_install?}" ]; then
+        echo "fact_is_puppetmaster=true" >> /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    else
+        echo "fact_is_puppetmaster=false" >> /etc/puppetlabs/facter/facts.d/puppet_enterprise_installer.txt
+    fi
+}
+
+# Install all modules to /opt/puppet/share/puppet/modules
+#
+# Arguments: None
+install_puppet_modules() {
+    # Save our current working directory.
+    pushd "${INSTALLER_DIR}" &>/dev/null
+    local t_install_dir="$(pwd)"
+    # JJM FIXME PACKAGING /opt/puppet/share/puppet/modules is managed by RPM packages but not DEB packages
+    if [ ! -d /opt/puppet/share/puppet/modules/ ]; then
+        display '"/opt/puppet/share/puppet/modules" does not exist, creating.'
+        run 'mkdir -p /opt/puppet/share/puppet/modules'
+    fi
+    # puppet-module installs into the current directory, so...
+    pushd /opt/puppet/share/puppet/modules &>/dev/null
+    for module_pkg in "${t_install_dir}"/modules/*.{tar.gz,tgz,tbz,tar.bz2}
+    do
+        if [ -e "${module_pkg}" ]; then
+            # Old versions of puppet-module installed into a vendor named directory
+            # Slice off everything on the left up to and including the right most slash
+            local module_file="${module_pkg##*/}"
+            # Slice off everything on the right up to and including the version string
+            local module_name_bad="${module_file%-*.*.*.tar.gz}"
+            # Slice off the leading vendor name separated by a hyphen
+            local module_name_good="${module_name_bad#*-}"
+            # JJM Believe it or not, these quotes are actually balanced and correct
+            # --force is present to ensure we overwrite modules we control
+            run '/opt/puppet/bin/puppet-module install "'"${module_pkg}"'" --force'
+            if [ -d "${module_name_bad}" ]; then
+                # Yes, these quotes are balanced and correct
+                run "mv '${module_name_bad}' '${module_name_good}'"
+            fi
+        fi
+    done
+    # Pop back to $INSTALLER_DIR
+    popd &>/dev/null
+    # Pop back to original $PWD
+    popd &>/dev/null
+}
+
+# Configure mcollective on a puppet master
+# This is a really weird way to do it, but as long
+# as the module is installed correctly and the facts
+# are defined correctly it will "just work"
+configure_mcollective_master() {
+    display "Running puppet apply to configure MCollective ..."
+    run "/opt/puppet/bin/puppet --modulepath /opt/puppet/share/puppet/modules -v -e 'class { mcollectivepe: }'"
+    display "MCollective configuration is complete ..."
+}
+
+#===[ Main ]============================================================
+
+if [ "puppet-enterprise-installer" = "$(basename "${0?}")" ]; then
+
+    #---[ Environment ]-----------------------------------------------------
+
+    # Installing via sudo may not add required path components
+    PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+
+    #---[ Paranoia ]--------------------------------------------------------
+
+    # Exit immediately if a simple command exits with a non-zero status:
+    set -e
+
+    #---[ Debug ]-----------------------------------------------------------
+
+    # Display execution trace information for debugging and save it to a file:
+    if ! (echo $- | grep x) > /dev/null; then
+        i=1
+        for item in "$@"; do
+            if [ '-D' = "${item?}" ]; then
+                logfile=`mktemp -t puppet-enterprise-installer.log.XXXXXXXXXX`
+                sh -x "${0?}" "$@" 2>&1 | tee "${logfile?}"
+                echo "!! Wrote debugging information to: ${logfile?}"
+                quit
+            fi
+            i=$(( ${i?} + 1 ))
+        done
+    fi
+
+    #---[ Prepare ]---------------------------------------------------------
+
+    # Catch CTRL-C and "set -e" errors:
+    register_exception_handler
+
+    # Setup "PLATFORM_*" variables:
+    prepare_platform
+
+    #---[ Process command-line options ]------------------------------------
+
+    ANSWER_FILE_TO_LOAD=
+    ANSWER_FILE_TO_SAVE=
+    IS_ANSWER_REQUIRED=n
+    LOGFILE=
+    IS_NOOP=n
+
+    while getopts a:A:Dhl:nqs: name; do
+        case "$name" in
+            a)
+                ANSWER_FILE_TO_LOAD="${OPTARG?}"
+                IS_ANSWER_REQUIRED=y
+                ;;
+            A)
+                ANSWER_FILE_TO_LOAD="${OPTARG?}"
+                IS_ANSWER_REQUIRED=n
+                ;;
+            D)
+                # Do nothing, this is handled for us during preparation
+                ;;
+            h)
+                display_header
+                display_usage
+                ;;
+            l)
+                LOGFILE="${OPTARG?}"
+                if [ -s "${LOGFILE?}" ]; then
+                    # Clear the file so it can be appended throughout the installer's execution
+                    echo -n > "${LOGFILE?}"
+                fi
+                ;;
+            n)
+                IS_NOOP=y
+                ;;
+            s)
+                ANSWER_FILE_TO_SAVE="${OPTARG?}"
+                ;;
+            ?)
+                display_header
+                display_usage "Illegal option specified"
+                ;;
+        esac
+    done
+
+    #---[ Announce installation ]-------------------------------------------
+
+    # Announce installer:
+    display_header
+
+    # Prepare the installer variable:
+    installer_dir > /dev/null
+
+    # Ensure platform is supported:
+    if [ -d "`platform_package_dir`" ]; then
+        display "for ${PLATFORM_TAG?}"
+    else
+        display_major_separator
+        display_newline
+        display_failure "Can't find packages for platform: ${PLATFORM_TAG?}"
+    fi
+
+    # Check for existing PE:
+    if [ -f /opt/puppet/bin/puppet ]; then
+        display_failure "Existing Puppet Enterprise installation detected.
+            Please run 'puppet-enterprise-upgrader' instead."
+    fi
+
+    # Check user:
+    prepare_user
+
+    # Load answers if specified:
+    if [ ! -z "${ANSWER_FILE_TO_LOAD?}" ]; then
+        load_answers "${ANSWER_FILE_TO_LOAD?}"
+    fi
+
+    #---[ Interview user ]--------------------------------------------------
+
+    display_step 'SELECT AND CONFIGURE PRODUCTS' n
+    display_newline
+    if [ 'false' =  "${CLIENT_ONLY?}" ]; then
+        echo "This installer will offer to install puppet master, Puppet Dashboard and puppet agent." | display_wrapped_text
+        display_newline
+
+        display_product 'puppet master' 'The puppet master service manages the configurations of a group of puppet agent nodes. It can optionally integrate with Puppet Dashboard for reporting and node classification.'
+        ask q_puppetmaster_install 'Install puppet master?' Yn
+        display_product 'Puppet Dashboard' 'The Puppet Dashboard application collects reports from a puppet master server, presents node information in a web interface, and provides a graphical environment in which to group and modify puppet agent nodes.'
+        ask q_puppetdashboard_install 'Install Puppet Dashboard?' Yn
+        if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+            q_puppetagent_install='y'
+            display_product 'puppet agent' 'The puppet agent is automatically installed when either the dashboard or master is installed.'
+        else
+            display_product 'puppet agent' 'The puppet agent service receives configurations from a puppet master server and applies them to this computer.'
+            ask q_puppetagent_install 'Install puppet agent?' Yn
+        fi
+        if [ y = "${q_puppetmaster_install?}" ]; then
+            ask q_puppetmaster_certname "Puppet master's \"certname\"?" StringForceLowerCase "${PLATFORM_HOSTNAME?}" # This question to be removed per Issue #5558, with q_puppetmaster_certname set to "puppet". (Should this variable still be settable via an answer file?)
+            ask q_puppetmaster_certdnsnames "Puppet master's certified hostnames (colon-separated list of hostnames and FQDNs which resolve to this server)?" StringWithoutCommas "$(display_certdnsnames "${q_puppetmaster_certname?}")"
+            ask q_puppetmaster_use_dashboard_reports "Send reports to Puppet Dashboard?" Yn
+            ask q_puppetmaster_use_dashboard_classifier "Use Puppet Dashboard as an external node classifier?" Yn
+            if [ n = "${q_puppetdashboard_install?}" ]; then
+                ask q_puppetmaster_forward_facts "Forward Facts to inventory service (same host as Dashboard)?" Yn
+                # TODO - this may need to be a config option
+                q_puppetmaster_inventory_port=8140
+            else
+                q_puppetmaster_forward_facts='n'
+            fi
+            if [ y = "${q_puppetmaster_use_dashboard_reports?}" -o y = "${q_puppetmaster_use_dashboard_classifier?}" -o y = "${q_puppetmaster_forward_facts?}" ]; then
+                ask q_puppetmaster_dashboard_hostname "Puppet Dashboard hostname to use?" String localhost
+                ask q_puppetmaster_dashboard_port "Puppet Dashboard port to use?" String 3000
+            fi
+        fi
+
+        if [ y = "${q_puppetdashboard_install?}" ]; then
+            ask q_puppetdashboard_httpd_port "Port to run Puppet Dashboard on?" String 3000
+            q_puppetdashboard_inventory_port=8140
+            # set up dashboard master if there is no master
+            if [ y = "${q_puppetmaster_install}" ]; then
+                # if a master is installed, use this as the inventory service
+                q_puppetdashboard_inventory_hostname="${q_puppetmaster_certname?}"
+                q_puppetdashboard_master_hostname="${q_puppetmaster_certname?}"
+            else
+                ask q_puppetdashboard_inventory_certname "Certname to use for the the inventory service" StringForceLowerCase "${PLATFORM_HOSTNAME?}"
+                ask q_puppetdashboard_inventory_certdnsnames "Certified hostnames for inventory service (colon-separated list of hostnames and FQDNs which resolve to this server)?" StringWithoutCommas "$(display_certdnsnames "${q_puppetdashboard_inventory_certname?}")"
+                q_puppetdashboard_inventory_hostname="${q_puppetdashboard_inventory_certname?}"
+                # I need this for cert signing
+                ask q_puppetdashboard_master_hostname "Hostname of Puppet Master to use." StringForceLowerCase "${PLATFORM_HOSTNAME?}"
+                q_puppetmaster_certdnsnames="${q_puppetdashboard_inventory_certdnsnames?}"
+                q_puppetmaster_certname="${q_puppetdashboard_inventory_hostname?}"
+            fi
+            # We change the default answer depending upon whether MySQL is already installed
+            if is_package_installed mysql-server; then
+                t_q_puppetdashboard_database_install_answer=yN
+            else
+                t_q_puppetdashboard_database_install_answer=Yn
+            fi
+            ask q_puppetdashboard_database_install "Install a new MySQL database server for use with the Puppet Dashboard from your operating system's repository?" "${t_q_puppetdashboard_database_install_answer}"
+            if [ y = "${q_puppetdashboard_database_install?}" ]; then
+                ask q_puppetdashboard_database_root_password "What password should the 'root' user have on this new database? Minimum 4 characters" Password
+            else
+                display_newline
+                echo "Puppet Dashboard requires a MySQL database and an appropriately privileged user."
+
+                ask q_puppetdashboard_database_remote "Is your existing MySQL database server running on a remote host?" Yn
+                if [ y = "${q_puppetdashboard_database_remote?}" ]; then
+                    ask q_puppetdashboard_database_host 'Database server hostname?' String localhost
+                    ask q_puppetdashboard_database_port 'Database port?' String 3306
+                fi
+            fi
+            ask q_puppetdashboard_database_name 'Database name?' String dashboard
+            ask q_puppetdashboard_database_user "Database user$( if [ n = "${q_puppetdashboard_database_install?}" ]; then echo " (must have all privileges on the database '${q_puppetdashboard_database_name?}')"; fi)?" String dashboard
+            ask q_puppetdashboard_database_password 'Database user password? Minimum 4 characters' Password
+            # If the database is not to be installed, display the SQL snippet using their settings.
+            if [ y != "${q_puppetdashboard_database_install?}" ]; then
+                display_newline
+                echo "If the database and user have not yet been created on your database server, please log in as a privileged user and set them up manually. E.g.:" | display_wrapped_text
+                printf -- '%s' "
+
+                CREATE DATABASE ${q_puppetdashboard_database_name} CHARACTER SET utf8;
+                CREATE USER '${q_puppetdashboard_database_user}'@'localhost' IDENTIFIED BY '${q_puppetdashboard_database_password}';
+                GRANT ALL PRIVILEGES ON ${q_puppetdashboard_database_name}.* TO '${q_puppetdashboard_database_user}'@'localhost';
+                "
+                if [ y = "${q_puppetmaster_install?}" ]; then
+                    printf -- '%s' "
+                CREATE DATABASE ${q_puppetdashboard_database_name?}_inventory_service CHARACTER SET utf8
+                GRANT ALL PRIVILEGES ON ${q_puppetdashboard_database_name?}_inventory_service.* TO '${q_puppetdashboard_database_user}'@'localhost';
+                    "
+                fi
+
+            fi
+        fi
+    else
+        display_newline
+        echo "${PLATFORM_NAME?} ${PLATFORM_RELEASE?} only supports agent installation"
+        q_puppetmaster_install='n'
+        q_puppetdashboard_install='n'
+        q_puppetagent_install='y'
+    fi
+
+    if [ y = "${q_puppetagent_install?}" ]; then
+        ask q_puppetagent_certname "Unique identifier (\"certname\") for this puppet agent node?" StringForceLowerCase "${PLATFORM_HOSTNAME?}"
+        ask q_puppetagent_server "Puppet master hostname to connect to?" String `if [ y = "${q_puppetmaster_install?}" ] && [ ! -z "${q_puppetmaster_certname?}" ]; then echo ${q_puppetmaster_certname?}; else echo puppet; fi`
+        ask q_puppetagent_pluginsync "Use \"pluginsync\" to copy plugins from the puppet master?" Yn
+    fi
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" -o y = "${q_puppetagent_install?}" ]; then
+        if [ ! "x${PLATFORM_NAME?}" = "xsolaris" ]; then
+            display_product 'Development libraries' 'The development libraries allow you to do things like install Ruby gems that have native extensions (compiled C code).'
+            ask q_rubydevelopment_install 'Install the Ruby development libraries? (Requires GCC)' yN
+        fi
+    fi
+
+    #...[ Vendor packages ].................................................
+
+    # Enqueue vendor packages based on user's answers...
+
+    # NONPORTABLE
+    case "${PLATFORM_NAME?}" in
+        centos | rhel)
+            enqueue_package 'which'
+            case "${PLATFORM_RELEASE}" in
+                6)
+                    enqueue_package 'cronie'
+                    ;;
+                *)
+                    enqueue_package 'vixie-cron'
+                    ;;
+            esac
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                if [ y = "${q_rubydevelopment_install?}" ]; then
+                    enqueue_package 'gcc'
+                    enqueue_package 'glibc-devel'
+                fi
+            fi
+
+            enqueue_package 'net-tools'
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'apr'
+                enqueue_package 'apr-util'
+                # JJM mailcap is required for /etc/mime.types
+                # In both RHEL x5 and x6
+                enqueue_package 'mailcap'
+                if [ "x6" = "x${PLATFORM_RELEASE?}" ]; then
+                    # JJM apr-util-ldap is new in RHEL6
+                    enqueue_package 'apr-util-ldap'
+                fi
+            fi
+
+            if [ y = "${q_puppetmaster_install?}" ]; then
+                # First, install openjdk 1.6 if no /usr/bin/java exists
+                if [ ! -f /usr/bin/java ]; then
+                    enqueue_package 'java-1.6.0-openjdk'
+                # If it does exist, check that it's version 1.6 or 1.7
+                # and fail if it isn't
+                elif ! /usr/bin/java -version 2>&1 | grep -q -E '1\.[67]'; then
+                    display_failure "/usr/bin/java is not version 1.6 or 1.7"
+                fi
+            fi
+
+            if [ y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'mysql'
+                enqueue_package 'sudo'
+
+                if [ y = "${q_puppetdashboard_database_install?}" ]; then
+                    enqueue_package 'mysql-server'
+                fi
+            fi
+            ;;
+        sles)
+            enqueue_package 'cron'
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                if [ y = "${q_rubydevelopment_install?}" ]; then
+                    enqueue_package 'gcc'
+                    enqueue_package 'glibc-devel'
+                fi
+            fi
+
+            enqueue_package 'net-tools'
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'libapr1'
+                enqueue_package 'libapr-util1'
+            fi
+
+            if [ y = "${q_puppetmaster_install?}" ]; then
+                # First, install java-1_6_0-ibm if no /usr/bin/java exists
+                if [ ! -f /usr/bin/java ]; then
+                    enqueue_package 'java-1_6_0-ibm'
+                # If it does exist, check that it's version 1.6 or 1.7
+                # and fail if it isn't
+                elif ! /usr/bin/java -version 2>&1 | grep -q -E '1\.[67]'; then
+                    display_failure "/usr/bin/java is not version 1.6 or 1.7"
+                fi
+            fi
+
+            if [ y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'mysql-client'
+                enqueue_package 'sudo'
+
+                if [ y = "${q_puppetdashboard_database_install?}" ]; then
+                    enqueue_package 'mysql'
+                fi
+            fi
+            ;;
+        ubuntu | debian)
+            enqueue_package 'hostname'
+            enqueue_package 'cron'
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'libreadline5'
+
+                if [ y = "${q_rubydevelopment_install?}" ]; then
+                    enqueue_package 'build-essential'
+                fi
+            fi
+
+            if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'file'
+                enqueue_package 'libmagic1'
+                enqueue_package 'libpcre3'
+                enqueue_package 'mime-support'
+                enqueue_package 'libapr1'
+                if [ debian = "${PLATFORM_NAME?}" ]; then
+                    # echo "${PLATFORM_RELEASE}"
+                    if [ "x6" = "x${PLATFORM_RELEASE}" ]; then
+                        enqueue_package 'libcap2'
+                    else
+                        enqueue_package 'libcap1'
+                    fi
+                fi
+                enqueue_package 'libaprutil1'
+                if [ ubuntu =  "${PLATFORM_NAME?}" ]; then
+                    enqueue_package 'libaprutil1-dbd-sqlite3'
+                    enqueue_package 'libaprutil1-ldap'
+                elif [ debian = "${PLATFORM_NAME?}" ]; then
+                    if [ "x6" = "x${PLATFORM_RELEASE}" ]; then
+                        enqueue_package 'libaprutil1-dbd-sqlite3'
+                        enqueue_package 'libaprutil1-ldap'
+                    fi
+                fi
+            fi
+
+            if [ y = "${q_puppetmaster_install?}" ]; then
+                # First, install openjdk 1.6 if no /usr/bin/java exists
+                if [ ! -f /usr/bin/java ]; then
+                    enqueue_package 'openjdk-6-jre-headless'
+                # If it does exist, check that it's version 1.6 or 1.7
+                # and fail if it isn't
+                elif ! /usr/bin/java -version 2>&1 | grep -q -E '1\.[67]'; then
+                    display_failure "/usr/bin/java is not version 1.6 or 1.7"
+                fi
+            fi
+
+            if [ y = "${q_puppetdashboard_install?}" ]; then
+                enqueue_package 'mysql-client'
+                enqueue_package 'mysql-common'
+
+                if [ y = "${q_puppetdashboard_database_install?}" ]; then
+                    # Pre-seed the values of the MySQL server "root" password, otherwise "apt-get/dpkg" will prompt us for the values.
+                    echo "mysql-server-5.1 mysql-server/root_password password ${q_puppetdashboard_database_root_password:-""}" | debconf-set-selections
+                    echo "mysql-server-5.1 mysql-server/root_password_again password ${q_puppetdashboard_database_root_password:-""}" | debconf-set-selections
+
+                    enqueue_package 'mysql-server'
+                fi
+            fi
+            ;;
+        solaris)
+            # JJM There are no vendor packages to install on Solaris
+            :
+            ;;
+        *)
+            display_failure "Do not know how to install vendor packages on this platform."
+            ;;
+    esac
+
+    # Determine which vendor packages are missing
+    t_main_missing_vendor_packages="$(missing_queued_packages)"
+
+    # Continue interview
+    if [ ! -z "${ANSWER_FILE_TO_SAVE?}" ]; then
+        # When saving answers, always prompt user to install vendor packages
+        display_product 'Vendor Packages' "The Puppet product suite may require additional packages from your operating system vendor. You will need to either install these yourself, or allow them to be automatically installed from your operating system vendor's package repositories."
+        if [ ! -z "${t_main_missing_vendor_packages?}" ]; then
+            display_missing_vendor_packages "${t_main_missing_vendor_packages?}"
+        fi
+        ask q_vendor_packages_install 'Allow automatic installation of these packages?' Yn
+    elif [ ! -z "${t_main_missing_vendor_packages?}" ]; then
+        # When running, only prompt user to install vendor packages if needed
+        display_product 'Vendor Packages' "The installer has detected that Puppet Enterprise requires additional packages from your operating system vendor's repositories, and can automatically install them. If you choose not to install these packages automatically, the installer will exit so you can install them manually."
+        display_missing_vendor_packages "${t_main_missing_vendor_packages?}"
+        ask q_vendor_packages_install 'Install these packages automatically?' Yn
+        if [ ! y = "${q_vendor_packages_install?}" ]; then
+            display_failure "You must manually install the above packages before installing Puppet Enterprise."
+        fi
+    else
+        # Set default value
+        q_vendor_packages_install="${q_vendor_packages_install:-"n"}"
+    fi
+
+    #...[ Convenience links ]...............................................
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" ]; then
+        display_product 'Convenience Links' 'The selected Puppet software will be installed into "/opt/puppet", which may not be included in your default shell PATH. For ease of use, this installer can create symbolic links to these executables in "/usr/local/bin".'
+        ask q_puppet_symlinks_install "Setup symbolic links to Puppet executables in \"/usr/local/bin\"?" Yn
+    else
+        q_puppet_symlinks_install=n
+    fi
+
+    #---[ Save ]------------------------------------------------------------
+
+    if [ ! -z "${ANSWER_FILE_TO_SAVE?}" ]; then
+        display_step 'SAVE ANSWERS'
+        q_install=y
+        set | ${PLATFORM_EGREP?} '^q_' > ${ANSWER_FILE_TO_SAVE?}
+        display_comment "Saved answers to file: ${ANSWER_FILE_TO_SAVE?}"
+        display_newline
+        display_major_separator
+        quit
+    else
+        ANSWER_FILE_TO_SAVE="$(installer_dir)/answers.lastrun"
+        set | ${PLATFORM_EGREP?} '^q_' > ${ANSWER_FILE_TO_SAVE?}
+        display_comment "Saved answers to file: ${ANSWER_FILE_TO_SAVE?}"
+        display_newline
+        display_major_separator
+    fi
+
+
+    #---[ Quit early ]------------------------------------------------------
+
+    if [ ! y = "${q_puppetmaster_install?}" -a ! y = "${q_puppetagent_install?}" -a ! y = "${q_puppetdashboard_install?}" ]; then
+        display_newline
+        display_major_separator
+        display_newline
+        display_failure "Nothing selected for installation"
+    fi
+
+    #---[ Confirm ]---------------------------------------------------------
+
+    display_step 'CONFIRM PLAN'
+
+    ask q_install 'Perform installation?' Yn
+    if [ ! y = "${q_install?}" ]; then
+        display_newline
+        display_major_separator
+        display_newline
+        display "!! Installation cancelled"
+        display_newline
+        display_major_separator
+        quit 1
+    fi
+
+    #---[ Generate "puppet.conf" ]------------------------------------------
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        display_step 'GENERATE PUPPET CONFIGURATION'
+
+        filebuffer_append '[main]'
+        filebuffer_append '    vardir = /var/opt/lib/pe-puppet'
+        filebuffer_append '    logdir = /var/log/pe-puppet'
+        filebuffer_append '    rundir = /var/run/pe-puppet'
+        filebuffer_append '    modulepath = /etc/puppetlabs/puppet/modules:/opt/puppet/share/puppet/modules'
+        filebuffer_append '    user = pe-puppet'
+        filebuffer_append '    group = pe-puppet'
+        filebuffer_append "    archive_files = true"
+        filebuffer_append "    archive_file_server = ${q_puppetagent_server?}"
+
+        if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+            filebuffer_append ''
+            filebuffer_append '[master]'
+            filebuffer_append "    certname = ${q_puppetmaster_certname?}"
+            filebuffer_append "    certdnsnames = $(display_certdnsnames "${q_puppetmaster_certdnsnames?}")"
+            if [ y = "${q_puppetdashboard_install?}" ]; then
+                # only configure inventory service if dashboard and puppet
+                # are on the same machine
+                # TODO - this needs to be fixed
+                filebuffer_append '    facts_terminus = inventory_active_record'
+                # TODO - when we support storedconfigs, we need to ensure that we dont
+                # set conflicting db connection information
+                filebuffer_append '    dbadapter = mysql'
+                filebuffer_append "    dbname = ${q_puppetdashboard_database_name?}_inventory_service"
+                filebuffer_append "    dbuser = ${q_puppetdashboard_database_user?}"
+                filebuffer_append "    dbpassword = ${q_puppetdashboard_database_password?}"
+                filebuffer_append '    dbserver = localhost'
+            fi
+            if [ y = "${q_puppetmaster_install?}" ]; then
+                if [ y = ${q_puppetmaster_forward_facts?} ]; then
+                    filebuffer_append '    facts_terminus = rest'
+                    filebuffer_append "    inventory_server = ${q_puppetmaster_dashboard_hostname?}"
+                    filebuffer_append "    inventory_port = ${q_puppetmaster_inventory_port?}"
+                fi
+                if [ y = "${q_puppetmaster_use_dashboard_reports?}" ]; then
+                    filebuffer_append '    reports = http, store'
+                    filebuffer_append "    reporturl = http://${q_puppetmaster_dashboard_hostname?}:${q_puppetmaster_dashboard_port?}/reports/"
+                else
+                    filebuffer_append '    reports = store'
+                fi
+                if [ y = "${q_puppetmaster_use_dashboard_classifier?}" ]; then
+                    filebuffer_append '    node_terminus  = exec'
+                    filebuffer_append '    external_nodes = /etc/puppetlabs/puppet-dashboard/external_node'
+                fi
+            else
+                filebuffer_append '    ca = false'
+            fi
+
+            filebuffer_append '    ssl_client_header = SSL_CLIENT_S_DN'
+            filebuffer_append '    ssl_client_verify_header = SSL_CLIENT_VERIFY'
+        fi
+
+        if [ y = "${q_puppetagent_install?}" ]; then
+            filebuffer_append ''
+            filebuffer_append '[agent]'
+            filebuffer_append "    certname = ${q_puppetagent_certname?}"
+            filebuffer_append "    server = ${q_puppetagent_server?}"
+            filebuffer_append '    report = true'
+            filebuffer_append '    classfile = $vardir/classes.txt'
+            filebuffer_append '    localconfig = $vardir/localconfig'
+            filebuffer_append '    graph = true'
+            if [ y = "${q_puppetagent_pluginsync?}" ]; then
+                filebuffer_append '    pluginsync = true'
+            fi
+        fi
+
+        # Create configuration in temporary file so user isn't asked if package's configuration file should replace it.
+        filebuffer_write '/etc/puppetlabs/puppet/puppet.conf.tmp'
+
+        if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+            filebuffer_clear
+            filebuffer_append \
+"
+# This is an example auth.conf file, it mimics the puppetmasterd defaults
+#
+# The ACL are checked in order of appearance in this file.
+#
+# Supported syntax:
+# This file supports two different syntax depending on how
+# you want to express the ACL.
+#
+# Path syntax (the one used below):
+# ---------------------------------
+# path /path/to/resource
+# [environment envlist]
+# [method methodlist]
+# [auth[enthicated] {yes|no|on|off|any}]
+# allow [host|ip|*]
+# deny [host|ip]
+#
+# The path is matched as a prefix. That is /file match at
+# the same time /file_metadat and /file_content.
+#
+# Regex syntax:
+# -------------
+# This one is differenciated from the path one by a '~'
+#
+# path ~ regex
+# [environment envlist]
+# [method methodlist]
+# [auth[enthicated] {yes|no|on|off|any}]
+# allow [host|ip|*]
+# deny [host|ip]
+#
+# The regex syntax is the same as ruby ones.
+#
+# Ex:
+# path ~ .pp$
+# will match every resource ending in .pp (manifests files for instance)
+#
+# path ~ ^/path/to/resource
+# is essentially equivalent to path /path/to/resource
+#
+# environment:: restrict an ACL to a specific set of environments
+# method:: restrict an ACL to a specific set of methods
+# auth:: restrict an ACL to an authenticated or unauthenticated request
+# the default when unspecified is to restrict the ACL to authenticated requests
+# (ie exactly as if auth yes was present).
+#
+
+### Authenticated ACL - those applies only when the client
+### has a valid certificate and is thus authenticated
+
+# allow nodes to retrieve their own catalog (ie their configuration)
+path ~ ^/catalog/([^/]+)$
+method find
+allow \$1
+
+# allow all nodes to access the certificates services
+path /certificate_revocation_list/ca
+method find
+allow *
+
+# allow all nodes to store their reports
+path /report
+method save
+allow *
+
+# inconditionnally allow access to all files services
+# which means in practice that fileserver.conf will
+# still be used
+path /file
+allow *
+
+### Unauthenticated ACL, for clients for which the current master doesn't
+### have a valid certificate
+
+# allow access to the master CA
+path /certificate/ca
+auth no
+method find
+allow *
+
+path /certificate/
+auth no
+method find
+allow *
+
+path /certificate_request
+auth no
+method find, save
+allow *
+"
+            if [ y = "${q_puppetdashboard_install?}" ]; then
+                filebuffer_append \
+"
+path /facts
+auth yes
+method find, search
+allow dashboard
+
+path /facts
+auth yes
+method save
+allow ${q_puppetdashboard_master_hostname?}
+"
+            fi
+            filebuffer_append \
+"# this one is not stricly necessary, but it has the merit
+# to show the default policy which is deny everything else
+path /
+auth any
+"
+            filebuffer_write '/etc/puppetlabs/puppet/auth.conf.tmp'
+        fi
+    fi
+
+    #---[ Enqueue our packages ]--------------------------------------------
+
+    # NONPORTABLE
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-ruby'
+                enqueue_package 'pe-ruby-irb'
+                enqueue_package 'pe-ruby-libs'
+                enqueue_package 'pe-ruby-rdoc'
+                enqueue_package 'pe-ruby-ri'
+                enqueue_package 'pe-ruby-shadow'
+                enqueue_package 'pe-rubygems'
+                enqueue_package 'pe-rubygem-stomp'
+                enqueue_package 'pe-rubygem-stomp-doc'
+                enqueue_package 'pe-mcollective-common'
+                enqueue_package 'pe-mcollective'
+
+                if [ y = "${q_rubydevelopment_install?}" ]; then
+                    enqueue_package 'pe-ruby-devel'
+                fi
+                ;;
+            ubuntu | debian)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-ruby1.8'
+                enqueue_package 'pe-libruby1.8'
+                enqueue_package 'pe-ri1.8'
+                enqueue_package 'pe-ruby-shadow'
+                enqueue_package 'pe-rubygems'
+                enqueue_package 'pe-rubygems1.8'
+                enqueue_package 'pe-rubygem-stomp'
+                enqueue_package 'pe-mcollective-common'
+                enqueue_package 'pe-mcollective'
+
+                if [ y = "${q_rubydevelopment_install?}" ]; then
+                    enqueue_package 'pe-ruby1.8-dev'
+                fi
+                ;;
+            solaris)
+                enqueue_package 'pup-ruby'
+                enqueue_package 'pup-openssl'
+                enqueue_package 'pup-rubygems'
+                enqueue_package 'pup-stomp'
+                enqueue_package 'pup-mcollective'
+                ;;
+            *)
+                display_failure "Do not know how to install Ruby on this platform"
+                ;;
+        esac
+    fi
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-facter'
+                enqueue_package 'pe-puppet'
+                enqueue_package 'pe-rubygem-puppet-module'
+                enqueue_package 'pe-augeas'
+                enqueue_package 'pe-augeas-libs'
+                enqueue_package 'pe-ruby-augeas'
+                enqueue_package 'pe-ruby-ldap'
+                ;;
+            ubuntu | debian)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-facter'
+                enqueue_package 'pe-puppet-agent'
+                enqueue_package 'pe-puppet-common'
+                enqueue_package 'pe-puppet-module-tool'
+                enqueue_package 'pe-libaugeas0'
+                enqueue_package 'pe-augeas-tools'
+                enqueue_package 'pe-ruby-augeas'
+                enqueue_package 'pe-augeas-lenses'
+                enqueue_package 'pe-ruby-ldap'
+                ;;
+            solaris)
+                enqueue_package 'pup-facter'
+                enqueue_package 'pup-puppet'
+                ;;
+            *)
+                display_failure "Do not know how to install Puppet on this platform"
+                ;;
+        esac
+    fi
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel)
+                enqueue_package 'pe-httpd'
+                # JJM Starting with RHEL6 pe-httpd-tools is a new package not in previous versions
+                if [ "x6" = "x${PLATFORM_RELEASE}" ]; then
+                    enqueue_package 'pe-httpd-tools'
+                fi
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-httpd-passenger'
+                enqueue_package 'pe-mod_ssl'
+                enqueue_package 'pe-rubygem-rack'
+                enqueue_package 'pe-rubygem-rake'
+                ;;
+            sles)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-httpd'
+                enqueue_package 'pe-httpd-passenger'
+                enqueue_package 'pe-mod_ssl'
+                enqueue_package 'pe-rubygem-rack'
+                enqueue_package 'pe-rubygem-rake'
+                ;;
+            ubuntu | debian)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-httpd-mpm-worker'
+                enqueue_package 'pe-httpd-common'
+                enqueue_package 'pe-httpd'
+                enqueue_package 'pe-httpd-bin'
+                enqueue_package 'pe-httpd-utils'
+                enqueue_package 'pe-httpd-passenger'
+                enqueue_package 'pe-rack'
+                enqueue_package 'pe-rake'
+                ;;
+            *)
+                display_failure "Do not know how to install HTTPD on this platform"
+                ;;
+        esac
+    fi
+
+    if [ y = "${q_puppetmaster_install?}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-mcollective-client'
+                enqueue_package 'pe-activemq'
+                enqueue_package 'pe-tanukiwrapper'
+                ;;
+            ubuntu | debian)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-mcollective-client'
+                enqueue_package 'pe-activemq'
+                enqueue_package 'pe-tanukiwrapper'
+                ;;
+            *)
+                display_failure "Do not know how to install puppet master on this platform"
+                ;;
+        esac
+    fi
+    # install mcollective server components
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-puppet-server'
+                enqueue_package 'pe-rubygem-activesupport'
+                enqueue_package 'pe-rubygem-activeresource'
+                enqueue_package 'pe-rubygem-activerecord'
+                enqueue_package 'pe-rubygem-actionpack'
+                enqueue_package 'pe-rubygem-actionmailer'
+                enqueue_package 'pe-rubygem-rails'
+                ;;
+            ubuntu | debian)
+                enqueue_package 'pe-puppet-enterprise-release'
+                enqueue_package 'pe-puppet-master'
+                enqueue_package 'pe-actionmailer'
+                enqueue_package 'pe-activerecord'
+                enqueue_package 'pe-activeresource'
+                enqueue_package 'pe-activesupport'
+                enqueue_package 'pe-actionpack'
+                enqueue_package 'pe-rails'
+                ;;
+            *)
+                display_failure "Do not know how to install puppet master on this platform"
+                ;;
+        esac
+    fi
+
+    if [ y = "${q_puppetdashboard_install?}" ]; then
+        enqueue_package 'pe-puppet-dashboard'
+        enqueue_package 'pe-puppet-dashboard-baseline'
+        enqueue_package 'pe-rubygem-ar-extensions'
+
+        enqueue_package 'pe-ruby-mysql'
+    fi
+
+    #---[ Install packages ]------------------------------------------------
+
+    display_step 'INSTALL PACKAGES'
+
+    install_queued_packages
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetagent_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        # Replace the package's configuration file.
+        run "mv /etc/puppetlabs/puppet/puppet.conf.tmp /etc/puppetlabs/puppet/puppet.conf"
+    fi
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        run "mv /etc/puppetlabs/puppet/auth.conf.tmp /etc/puppetlabs/puppet/auth.conf"
+    fi
+    #---[ Setup packages ]--------------------------------------------------
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        display_comment 'Setting up puppet master...'
+
+        # FIXME PACKAGING should packages create these directories and set ownership?
+        run 'mkdir -p /var/opt/lib/pe-puppetmaster/public/ /var/opt/lib/pe-puppetmaster/public/tmp /var/opt/lib/pe-puppet/'
+        run 'chown -R pe-puppet:pe-puppet /var/opt/lib/pe-puppet/ /var/log/pe-puppet/'
+
+        # JJM Install modules
+        if [ y = "${q_puppetmaster_install?}" ]; then
+            install_puppet_modules
+            # Generate the master's SSL server certificate
+            run "/opt/puppet/bin/puppet cert --generate ${q_puppetmaster_certname?} --certdnsnames '${q_puppetmaster_certname?}:puppet' --verbose --color=false|| true"
+        fi
+
+
+        filebuffer_append \
+"Listen 8140
+<VirtualHost *:8140>
+    SSLEngine on
+    SSLCipherSuite SSLv2:-LOW:-EXPORT:RC4+RSA
+    SSLCertificateFile      /etc/puppetlabs/puppet/ssl/certs/${q_puppetmaster_certname?}.pem
+    SSLCertificateKeyFile   /etc/puppetlabs/puppet/ssl/private_keys/${q_puppetmaster_certname?}.pem
+    SSLCertificateChainFile /etc/puppetlabs/puppet/ssl/certs/ca.pem
+    SSLCACertificateFile    /etc/puppetlabs/puppet/ssl/certs/ca.pem
+    # CRL checking should be enabled; if you have problems with Apache complaining about the CRL, disable the next line
+"
+
+        # only expect the crl to be here if we have a CA
+        if [ y = "${q_puppetmaster_install?}" ]; then
+        filebuffer_append \
+"    SSLCARevocationFile     /etc/puppetlabs/puppet/ssl/ca/ca_crl.pem"
+        fi
+        filebuffer_append \
+"
+    SSLVerifyClient optional
+    SSLVerifyDepth  1
+    SSLOptions +StdEnvVars
+
+    # The following client headers allow the same configuration to work with Pound.
+    RequestHeader set X-SSL-Subject %{SSL_CLIENT_S_DN}e
+    RequestHeader set X-Client-DN %{SSL_CLIENT_S_DN}e
+    RequestHeader set X-Client-Verify %{SSL_CLIENT_VERIFY}e
+
+    RackAutoDetect On
+    DocumentRoot /var/opt/lib/pe-puppetmaster/public/
+    <Directory /var/opt/lib/pe-puppetmaster/>
+        Options None
+        AllowOverride None
+        Order allow,deny
+        allow from all
+    </Directory>
+</VirtualHost>"
+        filebuffer_write '/etc/puppetlabs/httpd/conf.d/puppetmaster.conf'
+
+# This is done to make it possible to trigger a license
+# check during master startup from config.ru, invoked by Passenger, in the
+# PE environment. To be removed when we insert a hook in Puppet to enable
+# this more cleanly.
+
+        filebuffer_append \
+'# A "config.ru", for use with every Rack-compatible webserver.
+# SSL needs to be handled outside this, though.
+
+$0 = "master"
+
+# If you want debugging, uncomment the following line:
+# ARGV << "--debug"
+
+ARGV += ["--rack"]
+require "puppet/application/master"
+
+class Puppet::Application::Master
+  unless defined?(setup_original) then
+    alias :setup_original :setup
+  end
+
+  def setup
+    result = setup_original
+
+    # This must run after the original setup method because we depend on it
+    # completing all our setup steps to be able to call these next methods...
+    if Puppet::SSL::CertificateAuthority.ca? then
+      begin
+        require "puppet/util/license"
+        Puppet::Util::License.display_license_status
+      rescue Exception => e
+        Puppet.crit("Loading the license code in the master failed:\n#{e}")
+        Puppet.crit("Something is very wrong with your install; please reinstall\n" +
+                    "or otherwise contact Puppet Labs for support!")
+        # ...and that is sufficient. --daniel 2011-01-18
+      end
+    end
+
+    result
+  end
+end
+
+run Puppet::Application[:master].run'
+        filebuffer_write '/var/opt/lib/pe-puppetmaster/config.ru'
+
+        filebuffer_clear
+        filebuffer_append "#!/opt/puppet/bin/ruby
+require 'openssl'
+require '/opt/puppet/share/puppet-dashboard/lib/puppet_https.rb'
+require 'cgi'
+raise Exception, 'requires the certname as an argument' unless ARGV[0]
+raise Exception, 'requires the puppetca as an argument' unless ARGV[1]
+key = OpenSSL::PKey::RSA.new(File.read(\"/etc/puppetlabs/puppet/ssl/private_keys/#{ARGV[0]}.pem\"))
+
+cert_req = OpenSSL::X509::Request.new
+cert_req.version = 0
+cert_req.subject = OpenSSL::X509::Name.new([['CN', ARGV[0]]])
+cert_req.public_key = key.public_key
+cert_req.sign(key, OpenSSL::Digest::MD5.new)
+
+PuppetHttps.put(\"https://#{ARGV[1]}:8140/production/certificate_request/#{ARGV[0]}\", 'text/plain', cert_req.to_s, false)
+"
+        filebuffer_write '/opt/puppet/bin/send_cert_request.rb'
+        run 'chmod a+rx /opt/puppet/bin/send_cert_request.rb'
+        filebuffer_clear
+        filebuffer_append "#!/opt/puppet/bin/ruby
+require 'openssl'
+require '/opt/puppet/share/puppet-dashboard/lib/puppet_https.rb'
+require 'cgi'
+raise Exception, 'requires the certname as an argument' unless ARGV[0]
+raise Exception, 'requires the puppetca as an argument' unless ARGV[1]
+cert_s = PuppetHttps.get(\"https://#{ARGV[1]}:8140/production/certificate/#{ARGV[0]}\", 's', false)
+cert = OpenSSL::X509::Certificate.new(cert_s)
+key = OpenSSL::PKey::RSA.new(File.read(\"/etc/puppetlabs/puppet/ssl/public_keys/#{ARGV[0]}.pem\"))
+raise \"Certificate doesn't match key\" unless cert.public_key.to_s == key.to_s
+File.open(\"/etc/puppetlabs/puppet/ssl/certs/#{ARGV[0]}.pem\", 'w') do |file|
+  file.print cert_s
+end
+
+ca_cert_s = PuppetHttps.get(\"https://#{ARGV[1]}:8140/production/certificate/ca\", 's', false)
+ca_cert = OpenSSL::X509::Certificate.new(ca_cert_s)
+raise \"Certificate isn't signed by CA\" unless cert.verify(ca_cert.public_key)
+File.open('/etc/puppetlabs/puppet/ssl/certs/ca.pem', 'w') do |file|
+  file.print ca_cert_s
+end
+"
+        filebuffer_write '/opt/puppet/bin/receive_signed_cert.rb'
+        run 'chmod a+rx /opt/puppet/bin/receive_signed_cert.rb'
+
+        if [ y = "${q_puppetmaster_install?}" ]; then
+            if [ y = "${q_puppetmaster_use_dashboard_classifier?}" ]; then
+                filebuffer_append "#!/opt/puppet/bin/ruby
+require 'yaml'
+require 'uri'
+require 'net/http'
+
+BASE=\"http://${q_puppetmaster_dashboard_hostname?}:${q_puppetmaster_dashboard_port?}\"
+NODE = ARGV.first
+
+url = URI.parse(\"#{BASE}/nodes/#{NODE}\")
+req = Net::HTTP::Get.new(url.path, 'Accept' => 'text/yaml')
+res = Net::HTTP.start(url.host, url.port) {|http| http.request(req) }
+
+case res
+when Net::HTTPSuccess
+    puts res.body
+    exit 0
+else
+    STDERR.puts \"Error: #{res.code} #{res.message.strip}\n#{res.body}\"
+    exit 1
+end "
+                filebuffer_write '/etc/puppetlabs/puppet-dashboard/external_node'
+                run 'chmod a+rx /etc/puppetlabs/puppet-dashboard/external_node'
+                run 'chmod a+rX /etc/puppetlabs/puppet-dashboard'
+            fi
+
+            filebuffer_clear
+            filebuffer_append \
+"
+# specify remote filebucket
+filebucket { 'main':
+  server => '${q_puppetmaster_certname?}',
+  path => false,
+}
+
+File { backup => 'main' }
+"
+            filebuffer_write '/etc/puppetlabs/puppet/manifests/site.pp'
+
+            run 'mkdir -p /etc/puppetlabs/puppet/modules/helloworld/lib'
+            run 'mkdir -p /etc/puppetlabs/puppet/modules/helloworld/manifests'
+            filebuffer_append "\
+class helloworld {
+  notify { 'example':
+    message => 'Hello World!',
+  }
+}"
+            filebuffer_write '/etc/puppetlabs/puppet/modules/helloworld/manifests/init.pp'
+        fi
+
+        # FIXME PACKAGING Should the packages set the permissions correctly?
+        run 'chown -R pe-puppet:pe-puppet /var/opt/lib/pe-puppet/ /var/opt/lib/pe-puppetmaster/ /var/log/pe-puppet/'
+    fi
+
+    if [ y = "${q_puppetagent_install?}" ]; then
+        display_comment 'Checking the agent certificate name detection...'
+        if run "/opt/puppet/bin/puppet agent --configprint certname --color=false"; then
+            display_comment 'Setting up puppet agent...'
+            if [ ! y = "${q_puppetmaster_install?}" ]; then
+                run "/opt/puppet/bin/puppet agent --no-daemonize --verbose --onetime --test --color=false|| true"
+            fi
+        else
+            display_failure 'The agent certificate name was incorrect; please check'
+            display_failure 'that your system can correctly resolve its own FQDN in DNS.'
+        fi
+
+        # NONPORTABLE
+        case "${PLATFORM_NAME?}" in
+            centos | rhel | sles)
+                bounce_service 'pe-puppet'
+                ;;
+            ubuntu | debian)
+                run "printf \"START=true\nDAEMON_OPTS=''\n\" > /etc/default/pe-puppet-agent"
+                bounce_service 'pe-puppet-agent'
+                ;;
+            solaris)
+                if [ ! -d /etc/puppetlabs ]; then
+                    mkdir /etc/puppetlabs
+                    chown root:root /etc/puppetlabs
+                    chmod 755 /etc/puppetlabs
+                fi
+                run "/usr/sbin/svccfg import /var/svc/manifest/network/puppetagent.xml"
+                run "/usr/sbin/svcadm enable  svc:/network/puppetagent:default"
+                ;;
+            *)
+                display_failure "Do not know how to start puppet agent service on this platform"
+                ;;
+        esac
+    fi
+
+    if [ y = "${q_puppetdashboard_install?}" ]; then
+        display_comment 'Setting up Puppet Dashboard...'
+        if [ y = "${q_puppetdashboard_database_install?}" ]; then
+            # NONPORTABLE
+            case "${PLATFORM_NAME?}" in
+                sles )
+                    bounce_service 'mysql'
+                    enable_service 'mysql'
+
+                    if ! run "mysqladmin -u root password ${q_puppetdashboard_database_root_password:-""} < /dev/null"; then
+                        # display_failure "Existing MySQL server found, can't reset its password."
+                        display_error "Existing MySQL server found; can't reset its password."
+                    fi
+                    ;;
+                centos | rhel )
+                    bounce_service 'mysqld'
+                    enable_service 'mysqld'
+
+                    if ! run "mysqladmin -u root password ${q_puppetdashboard_database_root_password:-""} < /dev/null"; then
+                        # display_failure "Existing MySQL server found, can't reset its password."
+                        display_error "Existing MySQL server found; can't reset its password."
+                    fi
+                    ;;
+                ubuntu | debian)
+                    bounce_service 'mysql'
+                    enable_service 'mysql'
+                    ;;
+                *)
+                    display_failure "Do not know how to setup MySQL Server on platform: ${PLATFORM_NAME?}"
+            esac
+            run "echo '
+CREATE DATABASE \`${q_puppetdashboard_database_name?}\` CHARACTER SET utf8;
+CREATE USER '\\''${q_puppetdashboard_database_user?}'\\''@'\\''localhost'\\'' IDENTIFIED BY '\\''${q_puppetdashboard_database_password?}'\\'';
+GRANT ALL PRIVILEGES ON \`${q_puppetdashboard_database_name?}\`.* TO '\\''${q_puppetdashboard_database_user?}'\\''@'\\''localhost'\\'';
+GRANT ALL PRIVILEGES ON \`${q_puppetdashboard_database_name?}_test\`.* TO '\\''${q_puppetdashboard_database_user?}'\\''@'\\''localhost'\\'';
+' | mysql --user=root --password='${q_puppetdashboard_database_root_password?}'"
+            run "echo '
+CREATE DATABASE ${q_puppetdashboard_database_name?}_inventory_service CHARACTER SET utf8;
+GRANT ALL PRIVILEGES ON ${q_puppetdashboard_database_name?}_inventory_service.* TO '\\''${q_puppetdashboard_database_user?}'\\''@'\\''localhost'\\'';
+' | mysql --user=root --password='${q_puppetdashboard_database_root_password?}'"
+        fi
+
+        #...[ database.yml ]....................................................
+
+        t_main__puppetdashboard_database_yml='/etc/puppetlabs/puppet-dashboard/database.yml'
+        filebuffer_clear
+        filebuffer_append \
+"common: &common
+    database: ${q_puppetdashboard_database_name?}
+    username: ${q_puppetdashboard_database_user?}
+    password: ${q_puppetdashboard_database_password?}"
+
+        if [ ! y = "${q_puppetdashboard_database_install?}" ]; then
+            if [ y = "${q_puppetdashboard_database_remote?}" ]; then
+                filebuffer_append \
+"    host: ${q_puppetdashboard_database_host?}
+    port: ${q_puppetdashboard_database_port?}"
+            fi
+        fi
+
+        filebuffer_append \
+"    adapter: mysql
+
+development:
+    <<: *common
+
+production:
+    <<: *common
+
+test:
+    database: ${q_puppetdashboard_database_name:-"dashboard"}_test
+    <<: *common"
+        filebuffer_write "${t_main__puppetdashboard_database_yml?}"
+
+        #...[ settings.yml ]...................................................
+        filebuffer_clear
+        filebuffer_append \
+"
+#===[ Settings ]=========================================================
+#
+# This file is meant for storing setting information that is never
+# published or committed to a revision control system.
+#
+# Do not modify this \"config/settings.yml.example\" file directly -- you
+# should copy it to \"config/settings.yml\" and customize it there.
+#
+#---[ Values ]----------------------------------------------------------
+
+# Node name to use when contacting the puppet master.  This is the
+# CN that is used in Dashboard's certificate.
+cn_name: 'dashboard'
+
+ca_crl_path: 'certs/dashboard.ca_crl.pem'
+
+ca_certificate_path: 'certs/dashboard.ca_cert.pem'
+
+certificate_path: 'certs/dashboard.cert.pem'
+
+private_key_path: 'certs/dashboard.private_key.pem'
+
+public_key_path: 'certs/dashboard.public_key.pem'
+
+# Port for the certificate authority.
+ca_port: 8140
+
+# Hostname of the certificate authority.
+ca_server: '${q_puppetdashboard_master_hostname?}'
+
+# Key length for SSL certificates
+key_length: 1024
+
+# The \"inventory service\" allows you to connect to a puppet master to retrieve and node facts
+enable_inventory_service: true
+
+# Hostname of the inventory server.
+inventory_server: '${q_puppetdashboard_inventory_hostname?}'
+
+# Port for the inventory server.
+inventory_port: ${q_puppetdashboard_inventory_port?}
+
+# Set this to true to allow Dashboard to display diffs on files that
+# are archived in the file bucket.
+use_file_bucket_diffs: true
+
+# Hostname of the file bucket server.
+file_bucket_server: '${q_puppetdashboard_master_hostname}'
+
+# Port for the file bucket server.
+file_bucket_port: 8140
+
+# Amount of time in seconds since last report before a node is considered no longer reporting
+no_longer_reporting_cutoff: 3600
+
+# How many days of history to display on the \"Daily Run Status\" graph
+daily_run_history_length: 30
+use_external_node_classification: true
+
+# Uncomment the following line to set a local time zone.  Run
+# \"rake time:zones:local\" for the name of your local time zone.
+#time_zone: 'Pacific Time (US & Canada)'
+
+# Look at http://ruby-doc.org/core/classes/Time.html#M000298 for the strftime formatting
+datetime_format: '%Y-%m-%d %H:%M %Z'
+date_format: '%A, %B %e, %Y'
+
+# Set this to the URL of an image. The image will be scaled to 155x23 pixels.
+#custom_logo_url: 'http://www.puppetlabs.com/images/puppet-short.png'
+# We will be deprecating using \"http://dashboard_servername/reports\" as the puppet master's reporturl.
+# Set this to 'true' once you have changed all your puppet masters to send reports to
+# \"http://dashboard_servername/reports/upload\"
+disable_legacy_report_upload_url: false
+
+# Disables the UI and controller actions for editing nodes, classes, groups and reports.  Report submission is still allowed
+enable_read_only_mode: false
+
+#===[ fin ]============================================================="
+
+        filebuffer_write "/etc/puppetlabs/puppet-dashboard/settings.yml"
+
+        #...[ puppetdashboard.conf ]............................................
+
+        filebuffer_clear
+        filebuffer_append \
+"Listen ${q_puppetdashboard_httpd_port?}
+<VirtualHost *:${q_puppetdashboard_httpd_port?}>
+    DocumentRoot /opt/puppet/share/puppet-dashboard/public
+    ErrorLog /var/log/pe-httpd/puppetdashboard.error.log
+    TransferLog /var/log/pe-httpd/puppetdashboard.access.log
+</VirtualHost>"
+        filebuffer_write "/etc/puppetlabs/httpd/conf.d/puppetdashboard.conf"
+
+        #.......................................................................
+
+        if [ y = "${q_puppetdashboard_database_install?}" ]; then
+            run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production db:create'
+        fi
+        run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production db:migrate'
+        run 'chown -Rvf puppet-dashboard:puppet-dashboard /var/log/pe-puppet-dashboard/*'
+    fi
+
+    if [ y = "${q_puppetmaster_install?}" -o y = "${q_puppetdashboard_install?}" ]; then
+        display_comment 'Starting Puppet HTTPD for puppet master and/or Puppet Dashboard...'
+
+        if ! is_noop; then
+            filebuffer_clear
+            filebuffer_append 'PassengerMaxPoolSize 2'
+            filebuffer_write "/etc/puppetlabs/httpd/conf.d/passenger-extra.conf"
+        fi
+
+        # NONPORTABLE
+        case "${PLATFORM_NAME?}" in
+            ubuntu | debian)
+                # Ubuntu's "pe-httpd" can't cope with ".bak" files.
+                run "rm -rf /etc/puppetlabs/httpd/*/*.bak"
+                # Ubuntu's "pe-httpd" doesn't enable some important modules by default
+                run "/opt/puppet/sbin/a2enmod ssl headers"
+                # Need to munge the /etc/default/pe-puppet-dashboard-workers init file for sanity
+                [ -f '/etc/default/pe-puppet-dashboard-workers' ] && run "sed -i 's/### START=no/START=yes/g' /etc/default/pe-puppet-dashboard-workers"
+                ;;
+        esac
+
+        if [ y = "${q_puppetmaster_install?}" ]; then
+            # only start the http service if we are a CA
+            # and can generate signed certs as a part of installation
+            bounce_service 'pe-httpd'
+        fi
+
+        if [ y = "${q_puppetdashboard_install?}" ]; then
+            run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production cert:create_key_pair'
+            if [ y = "${q_puppetmaster_install?}" ]; then
+                run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production cert:request'
+                run '/opt/puppet/bin/puppet cert --sign dashboard --color=false'
+                run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production cert:retrieve'
+            fi
+            run 'chown -Rvf puppet-dashboard:puppet-dashboard //opt/puppet/share/puppet-dashboard/certs'
+            bounce_service 'pe-puppet-dashboard-workers'
+            enable_service 'pe-puppet-dashboard-workers'
+            enable_service 'pe-puppet-dashboard'
+        fi
+    fi
+
+    install_utils_to_bin
+
+    if [ y = "${q_puppet_symlinks_install?}" ]; then
+        display_comment 'Creating symbolic links in "/usr/local/bin"...'
+        install_symlink bin/facter bin/puppet bin/puppet-module bin/pe-man
+        # mcollective-client is bound to the puppetmaster install for now
+        if [ y = "${q_puppetmaster_install}" ]; then
+            install_symlink bin/mco
+        fi
+    fi
+
+    #---[ Write Necessary Facter information ]------------------------------
+    write_facter_facts
+
+    # Configure MCollective (Mainly to generate RSA keys)
+    if [ y = "${q_puppetmaster_install?}" ]; then
+        configure_mcollective_master
+    fi
+
+    #---[ Finish installation ]---------------------------------------------
+
+    run "cp ${INSTALLER_DIR}/VERSION /opt/puppet/pe_version && chown root:root /opt/puppet/pe_version && chmod 644 /opt/puppet/pe_version"
+
+    display_step 'DONE'
+    display 'Thanks for installing Puppet Enterprise!'
+
+    display_newline
+    display_major_separator
+
+    quit
+fi
+
+#===[ End ]=============================================================
+
+# vim: tabstop=4:softtabstop=4:shiftwidth=4:expandtab

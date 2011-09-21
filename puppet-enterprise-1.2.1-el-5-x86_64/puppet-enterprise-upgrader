@@ -1,0 +1,316 @@
+#!/bin/bash
+#
+#==========================================================
+# Copyright @ 2011 Puppet Labs, LLC
+# Redistribution prohibited.
+# Address: 411 NW Park Ave., Suite 500 / Portland, OR 97209
+# Phone: (877) 575-9775
+# Email: info@puppetlabs.com
+#
+# Please refer to the LICENSE.pdf file included
+# with the Puppet Enterprise distribution
+# for licensing information.
+#==========================================================
+#
+# Puppet Enterprise Upgrader
+#
+# This script sources the installer script
+#
+# It makes use of the following functions from the installer:
+#   * register_exception_handler
+#   * prepare_platform
+#   * is_package_installed
+#   * package_file_to_name
+#   * package_name_to_file
+#   * package_pe_deps
+#   * install_puppet_modules
+#   * install_queued_packages
+#   * bounce_service
+#   * quit
+#
+# It scans the packages directory for the platform,
+# checks to see if a version of that package is installed,
+# and if so, adds that package and any PE dependencies to
+# the list of packages to be installed,
+# and then installs them.
+
+set -e
+
+handle_dashboard() {
+    # We will only see dashboard here if it got upgraded
+  if is_package_installed "pe-puppet-dashboard"; then
+    run 'cd /opt/puppet/share/puppet-dashboard; PATH=/opt/puppet/sbin:/opt/puppet/bin:$PATH rake RAILS_ENV=production db:migrate'
+    run 'chown -Rvf puppet-dashboard:puppet-dashboard /var/log/pe-puppet-dashboard/*'
+
+    case "${PLATFORM_PACKAGING}" in
+      dpkg)
+        # Need to munge the /etc/default/pe-puppet-dashboard-workers init file for sanity
+        run "sed -i 's/### START=no/START=yes/g' /etc/default/pe-puppet-dashboard-workers"
+        ;;
+    esac
+
+    bounce_service 'pe-puppet-dashboard-workers'
+    bounce_service 'pe-httpd'
+  fi
+}
+
+UPGRADER_DIR="$(dirname "${0?}")"
+INSTALLER_DIR=$UPGRADER_DIR . "${UPGRADER_DIR}/puppet-enterprise-installer"
+
+ANSWER_FILE_TO_LOAD=
+ANSWER_FILE_TO_SAVE=
+IS_ANSWER_REQUIRED=n
+LOGFILE=
+IS_NOOP=n
+
+while getopts a:A:Dhl:nqs: name; do
+    case "$name" in
+        a)
+            ANSWER_FILE_TO_LOAD="${OPTARG?}"
+            IS_ANSWER_REQUIRED=y
+            ;;
+        A)
+            ANSWER_FILE_TO_LOAD="${OPTARG?}"
+            IS_ANSWER_REQUIRED=n
+            ;;
+        D)
+            # Do nothing, this is handled for us during preparation
+            ;;
+        h)
+            display_header
+            display_usage
+            ;;
+        l)
+            LOGFILE="${OPTARG?}"
+            if [ -s "${LOGFILE?}" ]; then
+                # Clear the file so it can be appended throughout the installer's execution
+                echo -n > "${LOGFILE?}"
+            fi
+            ;;
+        n)
+            IS_NOOP=y
+            ;;
+        s)
+            ANSWER_FILE_TO_SAVE="${OPTARG?}"
+            ;;
+        ?)
+            display_header
+            display_usage "Illegal option specified"
+            ;;
+    esac
+done
+
+# Load answers if specified:
+if [ ! -z "${ANSWER_FILE_TO_LOAD?}" ]; then
+    load_answers "${ANSWER_FILE_TO_LOAD?}"
+fi
+
+register_exception_handler
+prepare_platform
+prepare_user
+
+PKG_NAMES=""
+PKG_FILES=""
+
+if ! [ -e /opt/puppet/bin/puppet ]; then
+  display_newline
+  display_failure "Puppet Enterprise must be installed before upgrading.
+      Please run puppet-enterprise-installer."
+fi
+
+# Fake out the installer interview questions needed by MCollective:
+# The master is only supported on RPM or DEB systems, so this is a fairly
+# legit test to determine the high level role until #9128 is resolved
+if is_package_installed "pe-puppet-server" || is_package_installed "pe-puppet-master"; then
+  q_puppetmaster_install=y
+else
+  q_puppetmaster_install=n
+fi
+
+# Always assume we have an agent.
+q_puppetagent_install=y
+# Assume the stomp server for MCollective is on the puppet master
+q_puppetagent_server="$(/opt/puppet/bin/puppet agent --configprint server)"
+
+if [ "solaris" = "${PLATFORM_NAME}" ]; then
+    enqueue_package 'pup-facter'
+    enqueue_package 'pup-puppet'
+    enqueue_package 'pup-ruby'
+    enqueue_package 'pup-openssl'
+    enqueue_package 'pup-rubygems'
+    enqueue_package 'pup-stomp'
+    enqueue_package 'pup-mcollective'
+else
+    for p in $(ls $(platform_package_dir)); do
+        PKG_NAME="$(package_file_to_name "${p}")"
+        if is_package_installed "${PKG_NAME}"; then
+            PKG_NAMES="${PKG_NAMES} ${PKG_NAME} $(package_pe_deps "${p?}")"
+        fi
+    done
+
+    # Brute force add mcollective, activemq, tanukiwrapper and friends to upgrade path
+    if [ y = ${q_puppetmaster_install?} ]; then
+      for p in $(cd $(platform_package_dir) && ls pe-{mco,activemq,tan}*); do
+          PKG_NAME="$(package_file_to_name "${p}")"
+          PKG_NAMES="${PKG_NAMES} ${PKG_NAME} $(package_pe_deps "${p?}")"
+      done
+
+      # Brute force add rails stack to debian master
+      if [ "xdpkg" = "x${PLATFORM_PACKAGING}" ]; then
+          for p in $(cd $(platform_package_dir) && ls pe-{acti*,rails,puppet-enterprise-release}*); do
+              PKG_NAME="$(package_file_to_name "${p}")"
+              PKG_NAMES="${PKG_NAMES} ${PKG_NAME} $(package_pe_deps "${p?}")"
+          done
+      fi
+    else
+      for p in $(cd $(platform_package_dir) && ls pe-mcollective{,-common}*); do
+          PKG_NAME="$(package_file_to_name "${p}")"
+          PKG_NAMES="${PKG_NAMES} ${PKG_NAME} $(package_pe_deps "${p?}")"
+      done
+    fi
+
+    if is_package_installed "pe-puppet-dashboard"; then
+      PKG_NAMES="${PKG_NAMES} pe-puppet-dashboard-baseline pe-rubygem-ar-extensions"
+    fi
+
+    PKG_NAMES=$(echo "${PKG_NAMES}" | tr " " "\n" | sort | uniq | tr "\n" " " )
+
+    for n in $PKG_NAMES; do
+        PKG_FILES="${PKG_FILES} $(package_name_to_file "${n}")"
+    done
+fi
+
+display_step 'UPGRADE PACKAGES'
+
+if ! [ "solaris" = "${PLATFORM_NAME}" ]; then
+  display_comment 'The following packages are scheduled to be installed.'
+  display_major_separator
+  display_newline
+  for i in ${PKG_NAMES}; do
+    echo $i
+  done
+fi
+
+display_newline
+ask q_upgrade_installation 'Perform Upgrade Installation?' yN
+
+#---[ Save ]------------------------------------------------------------
+
+if [ ! -z "${ANSWER_FILE_TO_SAVE?}" ]; then
+    display_step 'SAVE ANSWERS'
+    q_install=y
+    set | ${PLATFORM_EGREP?} '^q_' > ${ANSWER_FILE_TO_SAVE?}
+    display_comment "Saved answers to file: ${ANSWER_FILE_TO_SAVE?}"
+    display_newline
+    display_major_separator
+    quit
+else
+    ANSWER_FILE_TO_SAVE="$(installer_dir)/answers.lastrun"
+    set | ${PLATFORM_EGREP?} '^q_' > ${ANSWER_FILE_TO_SAVE?}
+    display_comment "Saved answers to file: ${ANSWER_FILE_TO_SAVE?}"
+    display_newline
+    display_major_separator
+fi
+
+if [ ! "y" = "${q_upgrade_installation}" ]; then
+  display_comment "Cancelling Upgrade Installation..."
+  quit
+fi
+
+display_comment "Upgrading Installation..."
+
+# Do the actual install. We're avoiding the enqueing system of the installer
+# for now, but should possibly revisit this later.
+
+case "${PLATFORM_PACKAGING}" in
+    rpm)
+      enqueue_package 'pe-puppet-enterprise-release'
+      case "${PLATFORM_NAME?}" in
+        sles)
+          enqueue_package 'cron'
+          run "zypper --no-gpg-checks install -y ${PKG_FILES}"
+          ;;
+        *)
+          case "${PLATFORM_RELEASE}" in
+            6)
+              enqueue_package 'cronie'
+              run "yum localinstall --nogpgcheck -y ${PKG_FILES}"
+              ;;
+            5)
+              enqueue_package 'vixie-cron'
+              run "yum localinstall --nogpgcheck -y ${PKG_FILES}"
+              ;;
+            4)
+              enqueue_package 'vixie-cron'
+              run "rpm -Uvh ${PKG_FILES}"
+              ;;
+          esac
+          ;;
+      esac
+
+      # Check for binary symlinks in /usr/local/bin
+      if [ -L /usr/local/bin/puppet ]; then
+        install_symlink bin/mco
+      fi
+
+      handle_dashboard
+      install_queued_packages
+
+      # Install modules if we're a master
+      if [ y = "${q_puppetmaster_install?}" ]; then
+        install_puppet_modules
+      fi
+      ;;
+
+    dpkg)
+      enqueue_package 'cron'
+      if [ y = "${q_puppetmaster_install?}" ]; then
+        # First, install openjdk 1.6 if no /usr/bin/java exists
+        if [ ! -f /usr/bin/java ]; then
+            enqueue_package 'openjdk-6-jre-headless'
+        # If it does exist, check that it's version 1.6 or 1.7
+        # and fail if it isn't
+        elif ! /usr/bin/java -version 2>&1 | grep -q -E '1\.[67]'; then
+            display_failure "/usr/bin/java is not version 1.6 or 1.7"
+        fi
+
+        install_queued_packages
+        # Install modules if we're a master
+        install_puppet_modules
+      else
+        install_queued_packages
+
+      fi
+
+      run "dpkg --force-confdef -i ${PKG_FILES}"
+
+      # Check for binary symlinks in /usr/local/bin
+      if [ -L /usr/local/bin/puppet ]; then
+        install_symlink bin/mco
+      fi
+
+      handle_dashboard
+      ;;
+
+    pkgadd)
+      install_queued_packages
+      ;;
+
+    *)
+      display_failure "Do not know how to upgrade packages on platform: ${PLATFORM_NAME?}"
+      ;;
+esac
+
+# Write out facts for use by MCollective Puppet class.
+write_facter_facts
+
+# Configure MCollective (Mainly to generate RSA keys)
+if [ y = "${q_puppetmaster_install?}" ]; then
+    configure_mcollective_master
+fi
+
+cp ${UPGRADER_DIR?}/VERSION /opt/puppet/pe_version
+
+display_comment "Upgrade Installation Complete."
+
+quit

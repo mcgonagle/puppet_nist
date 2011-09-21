@@ -1,0 +1,150 @@
+SCOPE AND PURPOSE
+-----------------
+The scope and purpose of these puppet modules is to configure a Red Hat 
+Enterprise Linux 5 Desktop/Workstation to comply with USGCB settings.  
+Puppet enables these guidelines to be applied immediately after installation of the
+workstation and corrected routinely thereafter. It also provides an 
+administrator the ability to make changes to all the systems on the network as
+needed. 
+
+These puppet modules should provide a solid foundation for further site-specific
+customization and security hardening, as well as agile management.
+
+PREREQUISITES
+-------------
+The following must be available in order to activate a Puppet client system in
+the scenario we are targeting here:
+ * RHEL5 CD/DVD installation media
+ * Puppet server, serving the manifests included here
+ * HTTP or FTP server for the kickstart file
+ * rsyslog server, whose IP address is set on 
+   puppet:/etc/puppet/manifests/settings.pp
+ * NTP time server, whose IP address is set on 
+   puppet:/etc/puppet/manifests/settings.pp
+ * [optional, but recommended] DNS server for the statically-set IP addresses
+
+It is also possible to run puppet standalone on a single system without a puppet
+server, but this is not the recommended mode of operation. More information and
+instructions can be found below.
+
+PRE-INSTALLATION: CUSTOMIZE CONFIGURATION FILES
+-----------------------------------------------
+Several configuration files need to be adapted for the local environment before
+hosts are brought up on a network.
+ * Kickstart file: modify the kickstart file (workstation-ks.cfg) to ensure that
+needed packages will be installed, and that other settings are appropriate. 
+ * On the Puppet server:
+   - We will assume the default puppet server configuration: the server's 
+     host name should be 'puppet' and the base path for the puppet files will 
+     be /etc/puppet.
+   - /etc/puppet/manifests/settings.pp: Set up items such as NTP servers (local
+     or foreign), syslog servers, etc in this file.
+   - /etc/puppet/manifests/site.pp: Contains several global site variables; set
+     filebucket to the puppet server name.
+   - /etc/puppet/manifests/nodes/nodes.pp: Defines groups of workstations and 
+     which modules will be applied to each. The default regular expression 
+     matching workstation names, will apply all modules in this set to any 
+     machine name containing 'puppet'.
+
+PRE-INSTALLATION: SET UP PUPPETMASTER SERVER
+--------------------------------------------
+The puppet server, also called puppetmaster, is the server that controls all of
+the puppet clients. It holds the configuration files for every system managed
+by puppet.
+ * Install puppet-server from a trusted source.
+ * Unzip/tar the attached files into /etc/puppet/, the default location.
+ * Ensure port 8140 is open on any firewalls protecting the server.
+ * Start the puppetmaster daemon
+   # service puppetmaster start
+ * Troubleshoot any problems by running puppetmaster in debug mode:
+   # puppetmasterd --debug --no-daemonize
+
+INSTALLATION OF A WORKSTATION
+-----------------------------
+ * Make sure the prerequisite servers are up and running, and that forward and
+reverse DNS queries for the new workstation are answered properly by the DNS
+server.
+ * Ensure that the puppetmaster service is running on the puppet server.
+ * Insert the installation CD/DVD in the new worktation, and start it.
+ * At the boot prompt, enter the following command, appending network 
+   parameters as appropriate if your system cannot obtain them from a DHCP/DNS 
+   server:
+   - With a DHCP server: 
+     boot: linux ks=http://example.com/workstation-ks.cfg
+   - Without a DHCP server: 
+     boot: linux ks=http://example.com/workstation-ks.cfg bootproto=static 
+       ip=???? netmask=???? gateway=???? dns=???? ksdevice=eth0
+ * Set a root password when prompted.  
+ * Installation should complete without intervention from this point on.
+ * After reboot, set up static networking appropriately and ensure the 
+   workstation is properly configured in your DNS servers.  
+   - Note: Puppet needs DNS set up correctly for certificate signing. 
+ * At this point, puppet needs to be installed and run on each workstation.  
+   - Note: Ruby is a prerequisite for a puppet installation; it is not installed
+     by default on RHEL5, though the kickstart is configured to do so.
+ * Run puppet with appropriate parameters:
+   --waitforcert if manually signing certificates
+   --server if the puppet-server is running on a host not named 'puppet'
+   - Example: # puppetd --waitforcert 60 --server testpuppet.example.com
+ * To manually sign certificates, use the "puppetca" program on the puppet 
+   server.  
+   --list shows certificates waiting to be signed.  
+   --sign performs signing of the certificate specified.   
+ * Check any logs for possible errors, and reboot after puppet is finished.
+
+STAND-ALONE PUPPET OPERATION
+----------------------------
+The following instructions allow puppet modules to be tested on a single machine
+without having to go through the process of configuring a puppetmaster server.
+This is NOT a recommended way of permanently configuring systems for management
+since it has no centrally-managed component.
+ * Follow steps 2-6 of the previous section on workstation installation.
+ * Make sure that ruby and the selinux ruby bindings (libselinux-ruby) are
+   installed from either the install DVD or from the RedHat network
+ * Install the puppet client service from a trusted source (it is available in the
+   Fedora epel repo: http://fedoraproject.org/wiki/EPEL/FAQ#howtouse)
+ * Extract the tarball containing these puppet modules into /root on this
+   machine. Rename the puppet-sdc-sanitized folder to just puppet.
+ * Customize variables in puppet/manifests/settings.pp
+ * Ensure this workstation hostname is listed as a node that inherits the
+   workstation class at the bottom of puppet/manifests/nodes/nodes.pp
+   node <workstation_name> inherits workstation {}
+ * Execute puppet in standalone mode pointing it at the appropriate files.
+   puppet /root/puppet/manifests/site.pp --modulepath=/root/puppet/modules/
+ * Run the previous command at least twice to make sure dependencies are resolved
+ * If there are any errors, inspect the configuration to see if any changes are
+   necessary.
+ 
+TIPS
+---- 
+ * To test a subset of workstation modules, try using --tags:
+   # puppetd --server example.com --test --tags aide
+ * If errors occur, more verbose output can be enabled for troubleshooting:
+   # puppetd --debug --verbose ...
+   # puppetmasterd --debug --no-daemonize ... 
+
+WATCHING FOR ERRORS
+-------------------
+ * Documentation on puppet reports is here: 
+   http://docs.puppetlabs.com/references/stable/report.html
+ * The attached puppet.conf is configured to log errors to syslog and send 
+   tagmail reports as specified in tagmail.conf.
+ * Edit the /etc/puppet/tagmail.conf file to set up email recipients for 
+   specific tags (either workstation groups or modules)
+
+DOCUMENTATION
+-------------
+ * More documentation can be found at the puppet labs website:
+   - http://docs.puppetlabs.com/
+ * Puppet includes a tool called 'puppetdoc' that is capable of generating 
+   module and class specific documentation from the comments included in the 
+   code.  The attached code contains comments in a format compatible with 
+   puppetdoc.
+ * Generate this documentation with the command:
+   # puppetdoc --all --mode rdoc --modulepath PUPPETPATH/modules/ \
+     --manifestdir PUPPETPATH/manifests/
+   - Rdoc must be installed for the above command to work.
+ * The puppetdoc program will create a "doc" folder in the current directory 
+   containing all of the documentation embedded in the source code comments.  
+   - Access this documentation by opening doc/index.html in a web browser.
+

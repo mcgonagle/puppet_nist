@@ -50,13 +50,6 @@ class auditd {
 			ensure => installed;
 	}
 	
-	service {
-		"auditd":
-			ensure     => true,
-			enable     => true,
-			hasstatus  => true,
-			require    => Package["audit"],
-	}
 
 	# GuideSection 2.6.2.4.*
 	# Configure default comprehensive rules
@@ -81,5 +74,14 @@ class auditd {
 			onlyif  => "/usr/bin/test `grep audit /boot/grub/grub.conf |wc -l` -eq 0",
 			user    => "root",
 			require => Package["audit"],
+			notify  => Service["auditd"];
+	}
+
+	service {
+		"auditd":
+			ensure     => true,
+			enable     => true,
+			hasstatus  => true,
+			require    => Package["audit"],
 	}
 }

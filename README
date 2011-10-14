@@ -2,7 +2,7 @@ This git repository contains the NIST Puppet Reference Materials,
 which are an excellent implementation of the NSA's "Guide to the secure 
 configuration of Red Hat Enterprise Linux 5". The guide can be found 
 in this repository at:
-https://github.com/mcgonagletom/puppet_nist/blob/master/nsa_forge_materials/rhel5-guide-i731.pdf
+https://github.com/mcgonagletom/puppet_nist/blob/master/additional_materials/rhel5-guide-i731.pdf
 
 The original NIST materials can be found at:
 http://usgcb.nist.gov/usgcb/rhel/download_rhel5.html

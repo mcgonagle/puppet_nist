@@ -29,14 +29,6 @@
 #	CCE-4218-4
 #
 class yum {
-	# GuideSection 2.1.2.3.2
-	# Disable the yum-updatesd service and replace it with the cron job
-	service {
-		"yum-updatesd":
-			ensure  => false,
-			enable  => false,
-			require => File["/etc/cron.daily/yum.cron"];
-	}
 
 	# GuideSection 2.1.2.3
 	# Configure updates with yum
@@ -78,5 +70,14 @@ class yum {
 			lens	=> "yum.lns",
 			incl    => "/etc/yum.conf",
 			changes => "set main/gpgcheck 1";
+	}
+
+	# GuideSection 2.1.2.3.2
+	# Disable the yum-updatesd service and replace it with the cron job
+	service {
+		"yum-updatesd":
+			ensure  => false,
+			enable  => false,
+			require => File["/etc/cron.daily/yum.cron"];
 	}
 }

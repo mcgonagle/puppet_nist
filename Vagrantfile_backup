@@ -1,7 +1,0 @@
-Vagrant::Config.run do |config|
-    # Forward the SSH port. The 'forward_port_key' should match the
-    # name of the forwarded port.
-    config.ssh.forwarded_port_key = "ssh"
-    config.vm.forward_port("ssh", 22, 2222)
-    config.ssh.private_key_path = "keys/vagrant"
-end

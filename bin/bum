@@ -2,6 +2,6 @@
 #sudo /usr/bin/puppet --modulepath /vagrant/puppet/modules /vagrant/puppet/manifests/site.pp --debug --no-daemon --verbose
 #sudo puppet agent --no-daemon -d -v
 
-#sudo /opt/puppet/bin/puppet agent --no-daemon --debug --verbose --onetime --confdir=/etc/puppetlabs/puppet/ --server vagrant.puppetnist
+sudo /opt/puppet/bin/puppet agent --no-daemon --debug --verbose --onetime --confdir=/etc/puppetlabs/puppet/ --server vagrant.puppetnist
 
-sudo /opt/puppet/bin/puppet agent --no-daemon --onetime --verbose --confdir=/etc/puppetlabs/puppet/ --server vagrant.puppetnist
+#sudo /opt/puppet/bin/puppet agent --no-daemon --onetime --verbose --confdir=/etc/puppetlabs/puppet/ --server vagrant.puppetnist

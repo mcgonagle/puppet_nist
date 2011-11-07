@@ -1,0 +1,29 @@
+This git repository contains the NIST Puppet Reference Materials,
+which are an excellent implementation of the NSA's "Guide to the secure 
+configuration of Red Hat Enterprise Linux 5". The guide can be found 
+in this repository at:
+https://github.com/mcgonagletom/puppet_nist/blob/master/additional_materials/rhel5-guide-i731.pdf
+
+The original NIST materials can be found at:
+http://usgcb.nist.gov/usgcb/rhel/download_rhel5.html
+
+This repository also includes a basic 10 client licensed distribution of 
+Puppet Enterprise from Puppet Laboratories:
+http://puppetlabs.com/puppet/puppet-enterprise/
+
+This repository was designed to educate and demonstrate the power of Puppet.
+
+A Vagrant CentOS 5.7 VirtualBox VM was purpose built to demonstrate the 
+NIST Puppet Modules. The Vagrant package is distirbuted via a different
+means from the modules, due to size limitations with Github. 
+The vagrant package can be found at:
+https://s3.amazon.com/tomsfiles/package.box
+
+More information about vagrant, virtualbox and CentOS can be found at:
+http://vagrantup.com
+https://www.virtualbox.org/
+http://www.centos.org/
+
+
+Please contact the maintaner of this repository for more information.
+mcgonagle@gmail.com

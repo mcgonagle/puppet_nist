@@ -13,6 +13,8 @@
 # [Remember: No empty lines between comments and class definition]
 class vagrant {
   class {"vagrant::user::config": }
+  class {"vagrant::ssh::config": }
+  class {"vagrant::hosts::config": }
 
 
 }

@@ -31,14 +31,6 @@ class ntp {
 			ensure => installed,
 	}
 
-	service {
-		"ntpd":
-			ensure     => true,
-			enable     => true,
-			hasstatus  => true,
-			hasrestart => true;
-	}
-
 	file {
 		"/etc/ntp.conf":
 			owner   => "root",
@@ -47,6 +39,17 @@ class ntp {
 			content => template("ntp/ntp.conf.erb"),
 			require => Package["ntp"],
 	}
+
+	service {
+		"ntpd":
+			ensure     => true,
+			enable     => true,
+			hasstatus  => true,
+			hasrestart => true;
+			require => File["/etc/ntp.conf"],
+	}
+
+
 
 	# Set the clock whenever ntp.conf is changed, and allow large clock changes
 	exec {
@@ -57,4 +60,5 @@ class ntp {
 			# Usable timeout to hide "command timed out" errors
 			timeout     => "-1",
 	}
+
 }

@@ -11,7 +11,7 @@ restrict -6 default kod nomodify notrap nopeer noquery
 # Permit all access over the loopback interface.  This could
 # be tightened as well, but to do so would effect some of
 # the administrative functions.
-restrict 127.0.0.1 
+restrict <%= ipaddress_lo %>
 restrict -6 ::1
 
 # Use public servers from the pool.ntp.org project.

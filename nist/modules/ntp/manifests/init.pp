@@ -45,7 +45,7 @@ class ntp {
 			ensure     => true,
 			enable     => true,
 			hasstatus  => true,
-			hasrestart => true;
+			hasrestart => true,
 			require => File["/etc/ntp.conf"],
 	}
 

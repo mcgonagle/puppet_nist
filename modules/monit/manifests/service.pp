@@ -17,7 +17,7 @@ class monit::service {
                 ensure    => true,
                 enable    => true,
                 hasstatus => true,
-                hasrestart => true; }
+                hasrestart => true, }
 
 
 

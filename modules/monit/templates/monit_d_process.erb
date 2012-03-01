@@ -1,0 +1,8 @@
+check process <%= process_name %>
+   with pidfile <%= pid_file %>
+   group <%= group %>
+   start program = "<%= init_script %> start"
+   stop program = "<%= init_script %> stop"
+   if 2 restarts within 3 cycles then timeout
+   if totalmem > <%= total_mem %>% then alert
+   if cpu usage > <%= cpu_usage %>% for 3 cycles then restart

@@ -17,7 +17,7 @@ A Vagrant CentOS 5.7 VirtualBox VM was purpose built to demonstrate the
 NIST Puppet Modules. The Vagrant package is distirbuted via a different
 means from the modules, due to size limitations with Github. 
 The vagrant package can be found at:
-https://s3.amazon.com/tomsfiles/vagrant/package.box
+https://s3.amazonaws.com/tomsfiles/vagrant/package.box
 
 More information about vagrant, virtualbox and CentOS can be found at:
 http://vagrantup.com
